@@ -1,0 +1,941 @@
+---
+title: "Using genotypic data to construct GRM"
+author: "Dinesh Ghimire"
+date: "2026-05-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+#Libraries
+```{r Libraries}
+# packages required for analysis. 
+
+# List of required packages
+required_packages <- c("data.table", "stringr", "tidyr","dplyr","asreml", "ggplot2", "vcfR", "SNPfiltR")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+```{r need separate installation for this SNPfiltR package}
+#Install current release from CRAN
+#install.packages("SNPfiltR")
+
+#Install current development version directly from GitHub
+#library(devtools)
+#devtools::install_github("DevonDeRaad/SNPfiltR")
+
+```
+
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NY-DG"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NY-DG 
+#below is what I get when I call getwd. Just check to make sure that the root for this script is the base of the github project, sometimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa-NY-DG"
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If something is misssing please let me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NMSU cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+IN GENERAL: KNOW BEFORE WORKING WITH GENOTYPING DATA:
+- What sequencing method was used? (GBS, WGS,?) FOR ALFALFA: GBS ( From email: Santantonio_Project_002 (GBS: 192 alfalfa samples vs. PstI + MspI)
+- What is your ploidy? (Diploid vs tetraploid): FOR ALFALFA: tetraploid
+- Is the data pooled or per individual? FOR ALFALFA: pooled
+- What density is appropriate for your goal (low for diversity, high for GWAS)? FOR ALFALFA:tried three diff. density
+- Can you filter and impute genotypes? FOR ALFALFA: yes
+- Do you know how to interpret VCFs? learning below
+
+
+
+------------------------------------ Processing vcf ------------------------------------------
+
+# ALFALFA, NMSU
+
+The fixed VCF fields contains the standard VCF columns: CHROM: Chromosome, POS: Position, ID: Variant ID, REF: Reference allele, ALT: Alternate allele, QUAL: Quality score, FILTER: Filter status, INFO: Annotations (DP, AF, MQ, etc.)
+
+
+This file (80 samples file) has: 
+
+ - metadata (format, contigs reference used in the file (##contig), title explanation), then header with description from # CHROM to Filter Info (a long filter info), then starts genotyping information for each samples like ALF47_merged. These are pooled samples i.e. the plant material like leaf from different plants were grinded together for DNA extraction. so represents a mixed samples (popn) level genotype and not individual genotype level. 
+ 
+ - Detail on header and genotype: we have columns of #CHROM, then Position, then ID, Refrence allele, alternate allele, quality (Phred-scaled quality score), filter information (AB=0;ABP=0;AC=8;AF=0.142857;AN=56;AO=8;CIGAR=1X;DP=42;DPB=42;DPRA=1.25;EPP=3.0103;EPPR=3.0103;GTI=1;LEN=1;MEANALT=1;MQM=2.5;MQMR=4.35294;NS=14;NUMALT=1;ODDS=7.93337;PAIRED=1;PAIREDR=1;PAO=0;PQA=0;PQR=0;PRO=0;QA=296;QR=1246;RO=34;RPL=0;RPP=20.3821;RPPR=76.8404;RPR=8;RUN=1;SAF=4;SAP=3.0103;SAR=4;SRF=17;SRP=3.0103;SRR=17;TYPE=snp;technology.ILLUMINA=1) and finally FORMAT (GT:DP:AD:RO:QR:AO:QA). Then values according to the format. AB = 0 means Allele balance ( 0 means no ALT reads), ABP = Allele Balance Probability and so on..
+ 
+ - Genotype details: 
+  - First four values like 0/0/0/0 are for GT or genotype (encodes the genotypes), THEN
+  -  read depth (DP: total read depth at the site i.e. how many reads support this site in total), 
+  - allele depth (AD: comma-separated counts for each allele eg. 6,2 means 6 reads for REF, and 2 for ALT), 
+  - reference observations (RO: Number of reads supporting the reference allele), 
+  - quality for reference(QR: Aggregate quality score for REF-supporting reads), 
+  - alternate observations (AO:Number of reads supporting the alternate allele.), 
+  - quality for alternate (QA: Aggregate quality score for ALT-supporting reads)
+  
+Eg. AB=0;ABP=0;AC=8;AF=0.142857;AN=56;AO=8;CIGAR=1X;DP=42;DPB=42;DPRA=1.25;EPP=3.0103;EPPR=3.0103;GTI=1;LEN=1;MEANALT=1;MQM=2.5;MQMR=4.35294;NS=14;NUMALT=1;ODDS=7.93337;PAIRED=1;PAIREDR=1;PAO=0;PQA=0;PQR=0;PRO=0;QA=296;QR=1246;RO=34;RPL=0;RPP=20.3821;RPPR=76.8404;RPR=8;RUN=1;SAF=4;SAP=3.0103;SAR=4;SRF=17;SRP=3.0103;SRR=17;TYPE=snp;technology.ILLUMINA=1... HERE AF IS ALLELE FREQUENCY OF ALTERNATE ALLELE
+
+ ## for tetraploid genotypes (4 alleles per locus), the genotype strings (eg. 0/0/1/1) represents the number of alternate alleles (1s) in a set of 4. ) for reference allele and 1 for alternate allele. For example. if an alternate allele is "A" and reference allele is "T",then if a locus has 4 alleles as AATT, then its representation is: 0/0/1/1
+ ##Range: 0/0/0/0 → 0 , 0/0/0/1 → 1, 0/0/1/1 → 2 , 1/1/1/1 → 4.. so there are 5 dosage types (0,1,2,3,4). but can add to more than 4 too. Depending upon the read depth, the strings change to 3/3/3/3 as well... 
+ 
+ ## in vcf file, i copied this first SNP details as below. Here we have a SNP 20260 from chr 1. Then we have a few details (in first line 42 DP means combined of all samples), and then 46 sample's ( . means missing for that sample) genotypes details (GT:DP:AD: ...). 
+ Chr1	20260	.	G	A	0.00359059	.	AB=0;ABP=0;AC=8;AF=0.142857;AN=56;AO=8;CIGAR=1X;DP=42;DPB=42;DPRA=1.25;EPP=3.0103;EPPR=3.0103;GTI=1;LEN=1;MEANALT=1;MQM=2.5;MQMR=4.35294;NS=14;NUMALT=1;ODDS=7.93337;PAIRED=1;PAIREDR=1;PAO=0;PQA=0;PQR=0;PRO=0;QA=296;QR=1246;RO=34;RPL=0;RPP=20.3821;RPPR=76.8404;RPR=8;RUN=1;SAF=4;SAP=3.0103;SAR=4;SRF=17;SRP=3.0103;SRR=17;TYPE=snp;technology.ILLUMINA=1	GT:DP:AD:RO:QR:AO:QA	.	.	.	.	0/0/0/0:6:6,0:6:222:0:0	.	.	.	0/0/0/0:2:2,0:2:74:0:0	0/0/0/0:2:2,0:2:74:0:0	1/1/1/1:2:0,2:0:0:2:74	.	.	0/0/0/0:2:2,0:2:74:0:0	.	.	.	.	.	.	0/0/0/0:2:2,0:2:74:0:0	.	.	0/0/0/0:2:2,0:2:74:0:0	.	.	0/0/0/0:2:2,0:2:74:0:0	.	.	.	0/0/0/0:2:2,0:2:74:0:0	0/0/0/0:4:4,0:4:148:0:0	.	1/1/1/1:2:0,2:0:0:2:74	.	0/0/0/0:4:4,0:4:136:0:0	.	0/0/0/0:6:4,2:4:148:2:74	.	0/0/0/0:4:2,2:2:74:2:74	.	.	.	.	.	.
+
+
+lets try SNPfiltR package (https://devonderaad.github.io/SNPfiltR/)
+Notes: 
+1. remove SNPs with >5% missingness i.e. 95% cutoff and less than 10 dp (its easy to work after this filtering)
+2. Removing biallelic
+3. MAF
+4. To protect samples from missing, did SNP missingness filtering again
+5. LD pruning
+6. Mean Imputation
+7. GRM estimation: Re-scaled with trace vanRaden Method
+
+
+
+```{r}
+#step 1: load vcf file
+vcf <- read.vcfR("2022/genotype_data/alfalfa_sample80.vcf")
+dim(vcf) # 2180707
+
+# Step 2: SNPs with ≥95% call rate (i.e. <5% missing)
+vcf_filtered_95 <- missing_by_snp(vcf, cutoff = 0.95)
+dim(vcf_filtered_95)# 430477        8       47
+
+# Step 3: Extract DP and set genotype calls with DP < 10 to NA
+DP <- extract.gt(vcf_filtered_95, element = "DP", as.numeric = TRUE)
+dim(DP)
+ # manually check DP frame and compare with vcf@gt
+# Safely update genotype matrix
+gt_temp <- vcf_filtered_95@gt
+gt_temp[,-1][DP < 10] <- NA  # Keep FORMAT column untouched bcz we will use it later.
+dim(gt_temp) #430477 cz still not removed, we just set anything less than 10 to NA. 
+vcf_filtered_95@gt <- gt_temp
+# manually tested that the new vcf_filtered_95@gt has NA in position with less than 10 DP. 
+
+# Step 4: Remove DP < 10 i.e. remove those set up as NA's above
+vcf_filtered_95_10 <- missing_by_snp(vcf_filtered_95, cutoff = 0.95)
+dim(vcf_filtered_95_10) # 176216
+#manually check if those are removed. 
+
+#export vcf's
+write.vcf(vcf_filtered_95_10, file = "2022/genotype_data/alfalfa_vcf_filtered_95GT_10DP_format_sample80.vcf")
+write.vcf(vcf_filtered_95_10, file = "2022/genotype_data/alfalfa_vcf_filtered_95GT_10DP_format_sample80.vcf.gz")
+
+# import again
+vcf_filtered_95_10 <- read.vcfR("2022/genotype_data/alfalfa_vcf_filtered_95GT_10DP_format_sample80.vcf.gz")
+dim(vcf_filtered_95_10) # 176216
+unique(vcf_filtered_95_10@fix[, "CHROM"]) # has all chrom 1 to 8 and contigs
+# Step 5: Keep biallelic SNPs only
+biallelic_idx <- which(sapply(strsplit(vcf_filtered_95_10@fix[, "ALT"], ","), length) == 1)
+vcf_95_10_biallelic <- vcf_filtered_95_10[biallelic_idx, ]
+dim(vcf_95_10_biallelic) #157165
+# View(vcf_95_10_biallelic@fix)
+unique(vcf_95_10_biallelic@fix[, "CHROM"])
+
+
+#step 6: remove contigs i.e. Filter out contigs — keep only standard chromosomes Chr1 to Chr8
+standard_chroms <- paste0("Chr", 1:8) # define standard chromosome that we want
+chrom_vector <- vcf_95_10_biallelic@fix[, "CHROM"] # get chrom infor only
+keep_rows <- chrom_vector %in% standard_chroms # only keep rows with CHROM
+#gt_95_10_bi <- extract.gt(vcf_95_10_biallelic, element = "GT", as.numeric = FALSE)
+#gt_95_10_bi_chrom <- gt_95_10_bi[keep_rows, ] # now finally apply that filtering to our gt file
+#dim(gt_95_10_bi_chrom) # 151446  .. so around 6K contigs
+#now lets aopply to vcf
+vcf_95_10_biallelic <- vcf_95_10_biallelic[keep_rows, ]
+dim(vcf_95_10_biallelic) #151446
+cat("After Chr1–8 filter:", nrow(vcf_95_10_biallelic@fix), "\n")
+
+# Step 6: Extract AO and DP again (after biallelic filtering)
+AO <- extract.gt(vcf_95_10_biallelic, element = "AO", as.numeric = TRUE)
+DP <- extract.gt(vcf_95_10_biallelic, element = "DP", as.numeric = TRUE)
+
+
+
+
+# MAF
+
+# Step 7: Calculate ALT allele frequency = AO / DP
+AF_matrix <- AO / DP
+AF_matrix[DP < 10] <- NA  # Just to be safe (should already be NA from earlier)
+  # check manually
+dim(AF_matrix) # 151446 , still same
+
+# Step 8: Compute mean ALT AF and MAF
+allele_freq <- rowMeans(AF_matrix, na.rm = TRUE)
+  # check manuallyf for a few lines
+maf <- pmin(allele_freq, 1 - allele_freq)
+maf[1:10]
+ # manually checked if maf got minimum of those two or not. 
+
+# Step 9: Filter SNPs with MAF < 5%
+maf_keep_idx <- which(maf >= 0.05) # check which maf has at least 5% minor allele freq or 0.05. keep that.
+vcf_95_10_bi_5 <- vcf_95_10_biallelic[maf_keep_idx, ] #keep which fulfilled above condition so automatically any snps with less than 0.05 is removed
+AF_matrix_filtered <- AF_matrix[maf_keep_idx, ]
+dim(vcf_95_10_bi_5) #44682 thus removed almost 57k snps. 
+dim(AF_matrix_filtered) #44682 *46 , its same dimension. just frequencies instead of calls. 
+
+#View(vcf_95_10_bi_5@fix)
+# View(vcf_95_10_bi_5@gt)
+
+#export vcf's
+write.vcf(vcf_95_10_bi_5, file = "2022/genotype_data/alfalfa_vcf_95GT_10DP_bi_5_format_sample80.vcf")
+write.vcf(vcf_95_10_bi_5, file = "2022/genotype_data/alfalfa_vcf_95GT_10DP_bi_5_format_sample80.vcf.gz")
+
+#export csv's
+write.csv(AF_matrix_filtered, file = "2022/genotype_data/allele_freq_matrix_95GT_10DP_bi_5_sample80.csv")
+
+```
+## thus we now have:
+### - `vcf_95_10_bi_5`:  fully filtered vcfR object
+### - `AF_matrix_filtered`: allele frequency matrix (SNP × Sample)
+
+
+
+#Visualize through differnet plot types
+```{r 07252025}
+# visualize distribution
+AF_matrix_filtered <- read.csv("2022/genotype_data/allele_freq_matrix_95GT_10DP_bi_5_sample80.csv")
+dim(vcf) # 2180707
+
+library(reshape2)
+library(ggplot2)
+# step 1: make dataframe
+# Add SNP names (rownames already have them from VCF)
+AF_matrix_long <- melt(AF_matrix_filtered, varnames = c("SNP", "Sample"), value.name = "AF")
+
+# Add CHROM from SNP names (assumes format like "Chr1_123456")
+AF_matrix_long$CHROM <- sub("_.*", "", AF_matrix_long$SNP)
+AF_matrix_long <- AF_matrix_long %>% filter(!is.na(AF)) # remove NA's
+
+#Step 2: Faceted histogram per chromosome
+ggplot(AF_matrix_long, aes(x = AF)) +
+  geom_histogram(bins = 50, fill = "tomato", color = "black") +
+  facet_wrap(~ CHROM, scales = "free_y") +
+  labs(title = "Allele Frequency Distribution by Chromosome",
+       x = "Allele Frequency", y = "Count") +
+  theme_minimal()
+# same but in violin plot
+ggplot(AF_matrix_long, aes(x = CHROM, y = AF)) +
+  geom_violin(fill = "lightgreen") +
+  labs(title = "Allele Frequency Spread per Chromosome",
+       x = "Chromosome", y = "Allele Frequency") +
+  theme_minimal()
+
+# Step3: Count SNPs per chromosome
+# another plot type
+
+fix_df <- vcf_95_10_bi_5@fix         # fixed fields of VCF (CHROM, POS, etc.)
+chromosomes <- fix_df[, "CHROM"]           # chromosome names
+positions <- as.numeric(fix_df[, "POS"])   # SNP positions as numeric
+
+snp_counts <- table(chromosomes)
+
+barplot(snp_counts,
+        main = "SNP Counts per Chromosome",
+        xlab = "Chromosome",
+        ylab = "Number of SNPs",
+        col = "steelblue",
+        las = 2)    # rotate x-axis labels for readability
+
+# --- Step 4: Prepare data frame for SNP position plot ---
+snp_df <- data.frame(Chromosome = chromosomes, Position = positions)
+
+# Ensure Chromosome is factor with levels in original order for plotting
+snp_df$Chromosome <- factor(snp_df$Chromosome, levels = unique(snp_df$Chromosome))
+
+# --- Step 5: Plot SNP positions across chromosomes (jitter plot) ---
+ggplot(snp_df, aes(x = Chromosome, y = Position)) +
+  geom_jitter(width = 0.2, height = 0, alpha = 0.3, color = "darkred") +
+  labs(title = "SNP Positions by Chromosome",
+       x = "Chromosome",
+       y = "Position (bp)") +
+  theme_minimal()
+```
+
+
+
+
+
+
+do not remove sample 07302025 so more filtering based on SNP missingness.
+
+```{r}
+# 1. Read allele frequency matrix above (SNPs x Samples)
+AF_matrix_filtered <- read.csv("2022/genotype_data/allele_freq_matrix_95GT_10DP_bi_5_sample80.csv", row.names = 1)
+dim(AF_matrix_filtered)  # 44,682 SNPs × 47 samples
+
+# 2. Read corresponding VCF file
+vcf_95_10_bi_5 <- read.vcfR("2022/genotype_data/alfalfa_vcf_95GT_10DP_bi_5_format_sample80.vcf")
+dim(vcf_95_10_bi_5)  # 44,682 variants × 47 columns (includes meta)
+
+# 3. Visualize and summarize sample-level missingness
+sample_missing_pct <- colMeans(is.na(AF_matrix_filtered))
+sort(sample_missing_pct, decreasing = TRUE)
+# shows only two samples have 14-15% missingness
+
+# 4. Calculate SNP-level missingness
+snp_missing_pct <- rowMeans(is.na(AF_matrix_filtered))
+hist(snp_missing_pct, main = "SNP Missingness", xlab = "Proportion Missing", breaks = 30)
+# histogram shows a lot has 0% missing, a few have 2% and 4% missingness. I will drop 4% missing and see if that change for sample missing.
+
+
+# 5. Filter SNPs with ≤4% missing data (i.e., ≥96% call rate)
+AF_matrix_cleaned <- AF_matrix_filtered[snp_missing_pct <= 0.04, ]
+dim(AF_matrix_cleaned)  # ~38,745 SNPs × 46 samples
+
+# 6. Recheck sample-level missingness after SNP filtering
+sample_missing_rate_new <- colMeans(is.na(AF_matrix_cleaned))
+sort(sample_missing_rate_new, decreasing = TRUE)
+ # yaay, now all samples have less than 10% missing with max being 0.7% missing. 
+
+# 7. Filter VCF file to keep only those retained SNPs
+# Extract CHROM_POS identifiers for matching
+vcf_pos_ids <- paste(vcf_95_10_bi_5@fix[, "CHROM"], vcf_95_10_bi_5@fix[, "POS"], sep = "_")
+af_pos_ids <- rownames(AF_matrix_cleaned)
+
+# Subset VCF
+vcf_filtered <- vcf_95_10_bi_5[vcf_pos_ids %in% af_pos_ids, ]
+dim(vcf_filtered)  # Should match cleaned AF matrix: 38,745 variants and it did. 
+
+# 8. Save filtered VCF if needed
+write.vcf(vcf_filtered, file = "2022/genotype_data/alfalfa_vcf_95GT_10DP_bi_5_filtered_96callrate.vcf")
+
+
+#export vcf's
+write.vcf(vcf_filtered, file = "2022/genotype_data/alfalfa_vcf_96GT_10DP_bi_5_format_sample80.vcf")
+write.vcf(vcf_filtered, file = "2022/genotype_data/alfalfa_vcf_96GT_10DP_bi_5_format_sample80.vcf.gz")
+
+#export csv's
+write.csv(AF_matrix_cleaned, file = "2022/genotype_data/allele_freq_matrix_96GT_10DP_bi_5_sample80.csv")
+
+```
+
+allele_freq_matrix_96GT_10DP_bi_5_sample80.csv
+
+Visualize after additional SNP cutoff
+```{r}
+# visualize distribution
+AF_matrix_filtered <- read.csv("2022/genotype_data/allele_freq_matrix_96GT_10DP_bi_5_sample80.csv") 
+colnames(AF_matrix_filtered)
+AF_matrix_filtered <- AF_matrix_filtered %>% 
+  rename(SNP = X)
+dim(AF_matrix_filtered) # 38745 * 47 for samples and 1 column is snp name which we need below)
+#View(AF_matrix_filtered)
+
+# step 1: make dataframe
+# Add SNP names (rownames already have them from VCF)
+AF_matrix_long <- reshape2::melt(AF_matrix_filtered, varnames = c("SNP", "Sample"), value.name = "AF")
+
+# Add CHROM from SNP names (assumes format like "Chr1_123456")
+AF_matrix_long$CHROM <- sub("_.*", "", AF_matrix_long$SNP)
+AF_matrix_long <- AF_matrix_long %>% filter(!is.na(AF)) # remove NA's
+
+#Step 2: Faceted histogram per chromosome
+ggplot(AF_matrix_long, aes(x = AF)) +
+  geom_histogram(bins = 50, fill = "tomato", color = "black") +
+  facet_wrap(~ CHROM, scales = "free_y") +
+  labs(title = "Allele Frequency Distribution by Chromosome 96_10_bi_5",
+       x = "Allele Frequency", y = "Count") +
+  theme_minimal()
+# same but in violin plot
+ggplot(AF_matrix_long, aes(x = CHROM, y = AF)) +
+  geom_violin(fill = "lightgreen") +
+  labs(title = "Allele Frequency Spread per Chromosome 96_10_bi_5",
+       x = "Chromosome", y = "Allele Frequency") +
+  theme_minimal()
+
+# Step3: Count SNPs per chromosome
+# another plot type
+
+fix_df <- vcf_95_10_bi_5@fix         # fixed fields of VCF (CHROM, POS, etc.)
+chromosomes <- fix_df[, "CHROM"]           # chromosome names
+positions <- as.numeric(fix_df[, "POS"])   # SNP positions as numeric
+
+snp_counts <- table(chromosomes)
+
+barplot(snp_counts,
+        main = "SNP Counts per Chromosome 96_10_bi_5",
+        xlab = "Chromosome",
+        ylab = "Number of SNPs",
+        col = "steelblue",
+        las = 2)    # rotate x-axis labels for readability
+
+# --- Step 4: Prepare data frame for SNP position plot ---
+snp_df <- data.frame(Chromosome = chromosomes, Position = positions)
+
+# Ensure Chromosome is factor with levels in original order for plotting
+snp_df$Chromosome <- factor(snp_df$Chromosome, levels = unique(snp_df$Chromosome))
+
+# --- Step 4: Plot SNP positions across chromosomes (jitter plot) ---
+ggplot(snp_df, aes(x = Chromosome, y = Position)) +
+  geom_jitter(width = 0.2, height = 0, alpha = 0.3, color = "darkred") +
+  labs(title = "SNP Positions by Chromosome 96_10_bi_5",
+       x = "Chromosome",
+       y = "Position (bp)") +
+  theme_minimal()
+```
+
+
+12092025
+# do LD pruning, maf and mean imputation separately for NMSU samples and NY samples ( above filtering can be same)
+
+
+
+
+
+
+
+
+
+
+A lot of paper also does heterozygous filtering. in diploid more common bcz if unexpectedly high heterozygosity it might be due to sequwencing or alignment factors, so it’s a quality control step in diploid.  In polyploid pooled samples, Pooling samples further increases the observed genetic diversity and heterozygosity within a “sample,” making it near-impossible to distinguish whether high heterozygosity is biological (true diversity/polymorphism) or technical (artifacts, contamination, or misalignment) 
+*so not performed in pooled samples like ours.*
+
+
+
+# now lets do LD pruning
+
+
+------------------------------------ LD pruning of filtered vcf ------------------------------------------
+
+
+
+### LD Pruning: 
+- In GRM, LD pruning is less about reducing FDR and more about ensuring balanced genome-wide representation. Uneven SNP distribution (e.g., 90% of SNPs on 1–2 chromosomes) can bias the GRM towards those regions.
+- Ideal for GRM: evenly spaced SNPs across the genome to capture relationships uniformly. LD pruning helps remove densely packed SNPs and avoids overrepresenting certain genomic regions.
+
+#### Steps include: 
+- Load filtered VCF file (95% SNP missingness, read depth, MAF, biallelic filtering, 90% sample missingness)- 44682 markers * 45 samples
+- Transpose genotype af matrix: Need sample*SNP for SNP wise correlation, else sample wise cor.
+- Pairwise SNP correlation matrix(r): since there are tens of thousands of columns/SNPs, 44*44K will be out of memory in R local machine, so ran in window-based pruning (window-based LD pruning function)
+- Compute pairwise r2 (LD) inside each window and then drop SNP with r2 > threshold (0.8)
+- With 0.8 threshold, got down upto 33K. 
+
+
+from a *preprint*, filtering out redundant sites to alleviate p>>n probelm in GS: SNP sites are not independent of each other. Two SNPs located in LD often have a strong association. We can find related loci on the same chromosome or different
+chromosomes. The pairwise squared allele-frequency correlation (r2) represents the correlation strength between two sites. The value of r2 ranges from 0 to 1, where 0 indicates linkage equilibrium (two sites are randomly combined), and 1 indicates LD (two sites will produce the same information). The two sites with r2 = 1 are entirely redundant. These two sites increase
+the GS model calculation time and reduce the GS model accuracy. https://www.researchsquare.com/article/rs-3665572/v1 
+
+```{r Allele freq based LD pruning}
+
+AF_matrix_filtered <- read.csv("2022/genotype_data/allele_freq_matrix_96GT_10DP_bi_5_sample80.csv") %>%
+  select(-X.1)
+rownames(AF_matrix_filtered) <- AF_matrix_filtered$X
+AF_matrix_filtered <- AF_matrix_filtered %>%
+  select(-X)
+colnames(AF_matrix_filtered)
+dim(AF_matrix_filtered) # 38k *46
+
+# Step 1: Transpose AF matrix (SNPs as columns, samples as rows)
+AF_t <- t(AF_matrix_filtered)  # dim: samples x SNPs
+dim(AF_t) # 46*38K
+
+# Step 2: Compute pairwise correlation between SNPs (NOTE Since too large need to do in windows)
+ # 2.a. LD prune window
+# Function: LD pruning using pairwise r² in sliding windows
+ld_prune_window <- function(dosage_matrix, window_size = 1000, step = 500, r2_threshold = 0.8) { # Here 
+  keep_snps <- c()  # Store SNPs to retain
+  num_snps <- ncol(dosage_matrix) ## total no of columns or SNPs
+
+  for (start in seq(1, num_snps, by = step)) { ## slide over snps in defines steps
+    end <- min(start + window_size - 1, num_snps)# design window end
+    message("Processing SNPs ", start, " to ", end) # print progress once we run this
+    block <- dosage_matrix[, start:end, drop = FALSE] # extract SNP block
+
+    # Compute R² (squared Pearson correlation)
+    r2_block <- cor(block, use = "pairwise.complete.obs")^2 # R2 is square of correlation
+
+    # Identify SNPs to drop based on LD i.e LD pruning
+    drop_snps <- c()
+    snp_names <- colnames(r2_block)
+
+    for (i in 1:(ncol(r2_block) - 1)) {
+      for (j in (i + 1):ncol(r2_block)) {
+        if (!is.na(r2_block[i, j]) &&
+            r2_block[i, j] > r2_threshold &&
+            !(snp_names[j] %in% drop_snps)) {
+          drop_snps <- c(drop_snps, snp_names[j]) # If R² > threshold, drop the second SNP (j) in the pair (to retain only one of each correlated pair).
+        }
+      }
+    }
+
+    # Add retained SNPs from the block i.e. keep snps that we are not removing
+    block_keep <- setdiff(colnames(block), drop_snps)
+    keep_snps <- c(keep_snps, block_keep)
+  }
+
+  return(unique(keep_snps))
+}
+
+ # 2.b. Apply LD Pruning to AF matrix
+# AF matrix here should be: samples in rows, SNPs in columns, thus use transposed of AF matrix
+pruned_snp_names_96_10_bi_5_0.8 <- ld_prune_window(
+  dosage_matrix = AF_t,
+  window_size = 1000,
+  step = 500,
+  r2_threshold = 0.8)
+ # pruned_snp_names_96_10_bi_5_0.8 is the list of chr numbers and position that we are keeping. so next we will filter only these chrom.(matching with AF_t)
+# Number of SNPs retained
+length(pruned_snp_names_96_10_bi_5_0.8) #29268 from 38k so down by 9k
+
+sum(pruned_snp_names_96_10_bi_5_0.8 %in% colnames(AF_t))  # How many matched? 29268, all
+
+
+# filter your matrix based on retained SNPs (PRUNING)
+AF_t_pruned <- AF_t[, pruned_snp_names_96_10_bi_5_0.8, drop = FALSE]
+dim(AF_t_pruned) #   46*29K  should return a matrix with rows = samples, and columns are SNPs
+#View(AF_t_pruned)
+
+
+# export AF_filtered_pruned matrix in SNP*sample format
+AF_pruned <- t(AF_t_pruned)
+dim(AF_pruned) # 29k*46
+write.csv(AF_pruned, file = "2022/genotype_data/allele_freq_matrix_96GT_10DP_bi_5_0.8_sample80.csv")
+
+# to check some correlation values, we can check by selecting some portion og transposed matrix and performing correlation on that.
+
+block <- AF_t[, 1:1000, drop = FALSE]
+r2_block <- cor(block, use = "pairwise.complete.obs")^2
+#View(r2_block)
+
+```
+
+
+
+
+### Visualize resulting filtered and pruned file (SNPs count and density)
+```{r Visualize resulting filtered and pruned file (SNPs count and density) }
+# Read allele frequency matrix
+AF_pruned <- read.csv("2022/genotype_data/allele_freq_matrix_96GT_10DP_bi_5_0.8_sample80.csv") %>%
+  rename(SNP = X)
+colnames(AF_pruned)
+# Reshape to long format
+AF_matrix_long <- reshape2::melt(AF_pruned, varnames = c("SNP", "Sample"), value.name = "AF")
+AF_matrix_long$CHROM <- sub("_.*", "", AF_matrix_long$SNP)
+AF_matrix_long <- AF_matrix_long %>% filter(!is.na(AF))
+
+# Plot 1: Histogram by chromosome
+ggplot(AF_matrix_long, aes(x = AF)) +
+  geom_histogram(bins = 50, fill = "tomato", color = "black") +
+  facet_wrap(~ CHROM, scales = "free_y") +
+  labs(title = "Allele Frequency Distribution by Chromosome (96GT, DP10, bi, 5, 0.8)",
+       x = "Allele Frequency", y = "Count") +
+  theme_minimal()
+
+# Plot 2: Violin plot by chromosome
+ggplot(AF_matrix_long, aes(x = CHROM, y = AF)) +
+  geom_violin(fill = "lightgreen") +
+  labs(title = "Allele Frequency Spread per Chromosome (96GT, DP10, bi, 5, 0.8)",
+       x = "Chromosome", y = "Allele Frequency") +
+  theme_minimal()
+
+# now for futher plots, lets create AF_pruned with positions columns
+
+AF_pruned_pos <- AF_pruned %>%
+  mutate(
+    CHROM = sub("_.*", "", SNP),
+    POS = as.numeric(sub(".*_", "", SNP))
+  )
+# Plot 3: SNP count per chromosome
+AF_pruned_pos %>%
+  count(CHROM) %>%
+  ggplot(aes(x = CHROM, y = n)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  theme_minimal() +
+  geom_text(aes(label = n), vjust = -0.3, size = 4) +  # adds count above each bar
+  labs(title = "SNP Count per Chromosome (96GT, DP10, bi, 5, 0.8)", x = "Chromosome", y = "Count")
+
+# Plot 4: SNP positions by chromosome (jitter)
+ggplot(AF_pruned_pos, aes(x = CHROM, y = POS)) +
+  geom_jitter(width = 0.25, alpha = 0.4, color = "darkred") +
+  theme_minimal() +
+  labs(title = "SNP Positions across Chromosomes (96GT, DP10, bi, 5, 0.8)", x = "Chromosome", y = "Position (bp)")
+
+# Plot 5: SNP density per 1Mb bin (after pruning)
+ggplot(AF_pruned_pos, aes(x = POS)) +
+  geom_histogram(binwidth = 1e6, fill = "tomato", color = "orange") +
+  facet_wrap(~ CHROM, scales = "free_x") +
+  theme_minimal() +
+  labs(title = "SNP Density (1 Mb bins) (96GT, DP10, bi, 5, 0.8)", x = "Position (bp)", y = "Count")
+
+```
+
+
+
+ONLY DONE ON AF MATRIX NOT IN VCF
+# ------------------------------------ Imputation  ------------------------------------------
+
+
+after all filtering: Imputation
+Steps:
+- Imported allele frequency file which is SNP* sample format
+- Mean imputation SNP-wise to handle missing data. Missing values in allele frequency matrices often result from low coverage at a SNP in some samples.SNP-level mean imputation fills in missing values using the average allele frequency across samples — this reflects overall allele frequency and preserves population-level structure. SO mean across all samples and then impute that mean to any missing sample within that SNP. 
+- Confirmed there are no missing values left.
+- Exported final dosage matrix to a clean .csv file for downstream use. 
+
+
+Loops over each SNP (each row).
+
+Computes the mean allele frequency across all samples for that SNP, ignoring NAs.
+
+Replaces missing values in that SNP with the computed mean.
+
+```{r}
+# load the file
+AF_pruned <- read.csv(file = "2022/genotype_data/allele_freq_matrix_96GT_10DP_bi_5_0.8_sample80.csv", row.names = 1) # here header = TRUE so that samples are colnames, row.names makes SNP as rownames i.e. rownames TRUE, and skip =1 bcz we had an extra line there with header as 2nd row.
+dim(AF_pruned) # SNP*samples of 29268    46
+
+AF_pruned_imp <- as.matrix(AF_pruned)
+
+# Mean imputation across rows i.e. per SNP
+for (i in 1:nrow(AF_pruned_imp)) {
+  mean_dosage <- mean(AF_pruned_imp[i, ], na.rm = TRUE)
+  AF_pruned_imp[i, is.na(AF_pruned_imp[i, ])] <- mean_dosage
+}
+# here the loop imputes row-wise, which is appropriate for SNP-level imputation (filling in NA for a SNP using the mean allele frequency across all samples).
+
+# Check no missing left
+any(is.na(AF_pruned_imp))  # Should be FALSE and is FALSE
+
+# also manual check
+  # in 16th col and 6th row of AF_matrix_cleaned there is NA, so i did mean of that row and compared with the value imputed in AF_pruned. It matches, so great
+AF_matrix_cleaned[6,16] # came NA, for file before imputation
+mean(as.numeric(AF_matrix_cleaned[6, ]), na.rm = TRUE) # 0.7934
+AF_pruned_imp[6,16] # file after imputation and the value should be the mean we got above. Matched here got 0.7934...
+
+# we can save this imputed dosage matrix as CSV  for downstream use
+write.csv(AF_pruned_imp, file = "2022/genotype_data/alfalfa_LDpruned_imputed_dosage.csv", row.names = TRUE)
+
+
+```
+
+
+
+### Visualize resulting filtered and pruned file (SNPs count and density)
+```{r Visualize resulting filtered and pruned file (SNPs count and density) }
+# Read allele frequency matrix
+AF_pruned_imp <- read.csv("2022/genotype_data/alfalfa_LDpruned_imputed_dosage.csv") %>%
+  rename(SNP = X)
+colnames(AF_pruned_imp)
+# Reshape to long format
+AF_matrix_long <- reshape2::melt(AF_pruned_imp, varnames = c("SNP", "Sample"), value.name = "AF")
+AF_matrix_long$CHROM <- sub("_.*", "", AF_matrix_long$SNP)
+AF_matrix_long <- AF_matrix_long %>% filter(!is.na(AF))
+
+# Plot 1: Histogram by chromosome
+ggplot(AF_matrix_long, aes(x = AF)) +
+  geom_histogram(bins = 50, fill = "tomato", color = "black") +
+  facet_wrap(~ CHROM, scales = "free_y") +
+  labs(title = "Allele Frequency Distribution by Chromosome (96GT, DP10, bi, 5, 0.8)",
+       x = "Allele Frequency", y = "Count") +
+  theme_minimal()
+
+# Plot 2: Violin plot by chromosome
+ggplot(AF_matrix_long, aes(x = CHROM, y = AF)) +
+  geom_violin(fill = "lightgreen") +
+  labs(title = "Allele Frequency Spread per Chromosome (96GT, DP10, bi, 5, 0.8)",
+       x = "Chromosome", y = "Allele Frequency") +
+  theme_minimal()
+
+# now for futher plots, lets create AF_pruned_imp with positions columns
+
+AF_pruned_imp_pos <- AF_pruned_imp %>%
+  mutate(
+    CHROM = sub("_.*", "", SNP),
+    POS = as.numeric(sub(".*_", "", SNP))
+  )
+# Plot 3: SNP count per chromosome
+AF_pruned_imp_pos %>%
+  count(CHROM) %>%
+  ggplot(aes(x = CHROM, y = n)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  theme_minimal() +
+  geom_text(aes(label = n), vjust = -0.3, size = 4) +  # adds count above each bar
+  labs(title = "SNP Count per Chromosome (96GT, DP10, bi, 5, 0.8)", x = "Chromosome", y = "Count")
+
+# Plot 4: SNP positions by chromosome (jitter)
+ggplot(AF_pruned_imp_pos, aes(x = CHROM, y = POS)) +
+  geom_jitter(width = 0.25, alpha = 0.4, color = "darkred") +
+  theme_minimal() +
+  labs(title = "SNP Positions across Chromosomes (96GT, DP10, bi, 5, 0.8)", x = "Chromosome", y = "Position (bp)")
+
+# Plot 5: SNP density per 1Mb bin (after pruning)
+ggplot(AF_pruned_imp_pos, aes(x = POS)) +
+  geom_histogram(binwidth = 1e6, fill = "tomato", color = "orange") +
+  facet_wrap(~ CHROM, scales = "free_x") +
+  theme_minimal() +
+  labs(title = "SNP Density (1 Mb bins) (96GT, DP10, bi, 5, 0.8)", x = "Position (bp)", y = "Count")
+
+```
+
+
+
+
+
+
+# ------------------------------------ Genomic Relationship Matrix  ------------------------------------------
+
+NEXT GRM
+
+Here: II have 
+- Each entry is the frequency of the alternative allele in a pooled sample.
+- Ploidy = 4 (tetraploid).
+- You have a matrix of dimensions: SNPs × Samples.
+
+Next: 
+- Convert allele frequency to genotype dosage (0–4 scale).
+- Mean-center each SNP (marker).
+- Scale by expected variance (4p(1−p) per SNP).
+-Compute the GRM using formula: (M-P)(M-P)' / sum of 4p(1-p)
+- M-P is the centered dosage matrix called Z (samples *SNPs)
+
+
+The GRM is computed using the following formula:
+
+\[\text{GRM} = \frac{ZZ^\top}{\sum 4p(1 - p)}\] 
+
+
+
+ 
+ BUT we will follow trace method as mentioned in https://doi.org/10.1186/1297-9686-43-1 and https://www.nature.com/articles/ng.548 and Gower https://doi.org/10.1093/biomet/53.3-4.325.
+ 
+ two methods used to calculate additive genetic relationships between populations using allele freq estimates within each population. 
+ -1.  Additive genetic relationships among 46 alfalfa populations using allele frequency-based methods (use trace method to estimate G)
+
+- 2.  Pairwise population differentiation (F_st) using a formulation that accounts for allele frequency divergence and heterozygosity.( eqn 7 of Weir and Hill 2002) - Nicholas Report, Robbins Lab- not implementing here cz Nicholas had individual level genotyping data but this one is population level 
+ 
+ 
+ ### First, 1. Estimating additive GRM
+ Formula: G = nK/tr(K) where K = ZZ'/(m-1) for m sites and Z is n samples(row) by p snp's (col)
+```{r Trace method to estimate G}
+# 1. Your data: rows = SNPs, columns = samples
+AF_final <- read.csv("2022/genotype_data/alfalfa_LDpruned_imputed_dosage.csv", row.names = 1)
+dim(AF_final) # 29k*46
+AF_final <- as.matrix(AF_final)  # alt allele frequency (0–1)
+range(AF_final, na.rm=T) # 0 to 1 which is good
+all(is.na(AF_final)) # FALSE, so good bcz we imputed above and don't want empty spots here.
+
+# no need to convert into dosages here?
+
+# 2. Transpose so that we have sample * snp or n*p like the standard format.
+AF_final_t <- t(AF_final)
+range(AF_final_t, na.rm = T) # 0 to 1 which is good
+
+# 3. Center the genotype matrix (subtract SNP means, no scaling)
+Z <- scale(AF_final_t, center = TRUE, scale = FALSE) # this ensures that each SNP column has mean zero, which is essential for the VanRaden method.
+ # here the mean of each SNP i.e. column here in AF_final_t is subtracted from the af value. eg. 1st value here is 0.3157895 for chr 149046 and sample 47 and the mean of col 1 is 0.08924694, subtracting came 0.2265426 which is the first value in Z here. 
+AF_final_t[1,1]
+mean(AF_final_t[,1])
+  # this method of calculating Z is straight forward compared to what I did in class before where calculated p taking colMeans of dosages (columns were SNP), then create a new matrix with that p value in all rows of each columns, then subtract two matrices. (Problem set 2: Quant Gen class). also here we are dealing with allele freq not dosages like in class.
+
+dim(Z) # 46*29k
+ # and t(Z) is 29k*46 
+ # so the product will be 46*46
+
+# 4. Compute the centered relationship matrix K
+# Z %*% t(Z) computes the covariance between samples across SNPs
+# Dividing by (m-1) accounts for sample (SNP) size correction (unbiased estimator)
+m <- ncol(AF_final_t)  # number of SNPs
+K <- (Z %*% t(Z)) / (m - 1)
+
+# 5: Normalize K to get final G matrix with mean diagonal = 1
+# n = number of populations/samples
+n <- nrow(AF_final_t)
+G_mat <- (n * K) / sum(diag(K))  # Equivalent to: G = nK / tr(K)
+
+# 6: check final GRM
+mean(diag(G_mat))  # Should be 1.0 if normalization succeeded AND it is one
+hist(diag(G_mat), xlim = c(0, 2))  # Distribution of self-relatedness (diagonals). centers around 1. 
+
+dim(K)  # should be 46 x 46 and yes it is
+dim(G_mat)  # should also be 46 x 46 and yes it is
+
+# export
+write.csv(G_mat, file = "2022/genotype_data/GRM_alfalfa.csv", row.names = TRUE)
+
+```
+ 
+ 
+ might also use just the allele frequencies without converting into dosages... 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ --------------------------------------- PROCESSING GRM TO MATCH WITH PHENO FILE ----------------
+ 05072026 lets try with GRM
+First process GRM to match genotypes/lines as in phenotype file
+```{r Processing GRM file 08122025}
+
+#first need to load Grm file
+grm <- read.csv("2022/genotype_data/GRM_alfalfa.csv", sep =  ",", row.names = 1)
+dim(grm) # samples*samples = 46*46
+grm[1:5,]
+
+
+#also alfalfa_genotyping_samples file
+sample_file <- read_excel("Miscellaneous/Genotyping/alfalfa_genotyping_samples.xlsx", sheet = 2)
+sample_file[1:5,]
+# here the column ID has ALF01,... which are like ALF01_merged from GRM file. so lets convert name of GRM from ALF01_merged into only ALF01
+
+# first 19 are for NMSU genotypes and rest 28 are for NY or Cornell genotypes
+
+# to grm
+# Replace ALF01_merged → ALF01 which can be done by removing "_merged" from row and column names
+grm_mat <- grm
+rownames(grm_mat) <- gsub("_merged$", "", rownames(grm_mat))
+colnames(grm_mat) <- gsub("_merged$", "", colnames(grm_mat))
+# now lets replace rownames and colnames of grm_mat with Entry column matching names from ID. like ID column has ALF01 and iits corresponding Entry is AmeriStand 803T. so now change ALF01 from grm_mat into AmeriStand 803T. 
+ 
+## also reorder row and columns names in the alphabetical orders to match with alphabetical order of IDs from sample_file
+id_order <- sort(sample_file$ID)  # alphabetically
+#grm_mat <- grm_mat[id_order, id_order]
+# error The issue is clear now: your id_order vector has an ID "ALF29" which is missing from both the row names and column names of your grm_mat. That's why subsetting with grm_mat[id_order, id_order] fails with "undefined columns selected."
+
+# checked original vcf file, there are 46 samples only.. missing ALF_29 one.. Vernal entry from Cornell origin. 
+
+# Remove missing IDs from the order vector
+id_order_fixed <- intersect(id_order, rownames(grm_mat))
+
+# Reorder GRM by the IDs that actually exist in the matrix
+grm_mat <- grm_mat[id_order_fixed, id_order_fixed]
+
+# NOTE: ALF29 is not present here
+
+
+# Map IDs → Entry names
+id_to_entry <- setNames(sample_file$Entry, sample_file$ID)
+rownames(grm_mat) <- id_to_entry[rownames(grm_mat)]
+colnames(grm_mat) <- id_to_entry[colnames(grm_mat)]
+# View(grm_mat)
+
+# export
+write.csv(grm_mat, file = "2022/genotype_data/GRM_alfalfa_ordered_46samples.csv", row.names = TRUE)
+
+##### now manually change name of GRM to match with pheno file (ny_mus_pheno_22)
+
+
+```
+
+
+Manually fixed some germplasm name in GRM to match with Pheno file
+```{r Loading 46*46 grm and convert into 36*36 to match pheno file}
+grm_mat_46 <- read.csv("2022/genotype_data/GRM_alfalfa_ordered_46samples.csv", sep = ",", row.names = 1)
+
+# Next: match up names from grm_mat as it is in the phenotype file. there are certain differences like alphabetical type(capital letter), _ use, .. and also there are 22 germplasm unique in pheno file. but 46 in grm. we can only subset those that match close enough with germplasm column. I think ALF01 to ALF24 are the common ones. 
+# first 19 are for NMSU genotypes and rest 28 are for NY or Cornell genotypes
+
+rownames(grm_mat_46)
+unique(ny_mus_pheno_22$Germplasm)
+
+# lets normalize names
+# Function to normalize names for matching (upper-case, replace space/dot with underscore)
+normalize_name <- function(x) {
+  toupper(gsub("[[:space:]]+|\\.+", "_", trimws(x)))
+}
+
+
+# Original GRM names
+grm_names <- rownames(grm_mat_46)
+
+# Normalized GRM names
+norm_grm <- normalize_name(grm_names)
+
+# Normalized phenotype names
+norm_pheno <- normalize_name(ny_mus_pheno_22$Germplasm)
+
+# Ensure strings, not factors or numeric codes
+pheno_germ <- as.character(ny_mus_pheno_22$Germplasm)
+
+# Create mapping: names = original GRM names, values = matched Germplasm (or NA)
+mapping <- setNames(
+  pheno_germ[match(norm_grm, norm_pheno)], 
+  grm_names
+)
+
+# mapping will have some NAs for those without matches
+mapping
+# Rename: only replace where we have a match
+new_names <- ifelse(!is.na(mapping), mapping, grm_names)
+new_names
+rownames(grm_mat_46) <- new_names
+colnames(grm_mat_46) <- new_names
+data.frame(Original = grm_names, Renamed = rownames(grm_mat_46)) %>%
+  head(30)
+
+
+intersect(rownames(grm_mat_46), unique(ny_mus_pheno_22$Germplasm)) # 27 matches shown
+setdiff(rownames(grm_mat_46), unique(ny_mus_pheno_22$Germplasm)) # 19  shown
+setdiff(unique(ny_mus_pheno_22$Germplasm), rownames(grm_mat_46)) # 9 shown which are in phenotype file but not in GRM..
+
+
+# now lets remove those measures that are missing from grm and only keep those in the grm so we have 27*27 grm... then add missing germplasm without assuming any relationships with other germplasm so we have 24*24 matrix again...
+
+setdiff(unique(ny_mus_pheno_22$Germplasm), rownames(grm_mat_46)) # 9 shown which are in phenotype file but not in GRM..
+# Ensure the GRM starting point is numeric matrix
+grm_mat_46 <- as.matrix(grm_mat_46)
+
+
+# Define the lists for common and missing germplasm
+common_germ  <- intersect(rownames(grm_mat_46), as.character(unique(ny_mus_pheno_22$Germplasm)))
+# here add these germplasm manually 
+missing_germ <- c("AMERISTAND_427_TQ", "VERNAL", "HI-GEST_360", 
+                  "55V50", "WL_358LH", "FSG_415BR", "REBOUND_6XT", "FSG_421LH", "PERSIST_III")
+
+# Subset to 27×27 GRM for the genotyped germplasm
+grm_mat_27 <- grm_mat_46[common_germ, common_germ]
+
+# rescale back to having mean diag  = 1
+scale_factor_27 <- mean(diag(grm_mat_27))
+scale_factor_27
+grm_mat_27 <- grm_mat_27/scale_factor_27
+mean(diag(grm_mat_27)) # 1
+
+# Create 36×36 zero matrix
+all_germ <- c(common_germ, missing_germ)
+all_germ
+n_all    <- length(all_germ)
+n_all
+expanded_grm <- matrix(0, nrow = n_all, ncol = n_all,
+                       dimnames = list(all_germ, all_germ))
+
+# Fill in the block
+expanded_grm[common_germ, common_germ] <- grm_mat_27
+
+# 🔹 Set diagonal = 1 only for the new ones
+for(g in missing_germ){
+  expanded_grm[g, g] <- 1
+}
+
+# Check
+diag(expanded_grm)
+mean(diag(expanded_grm)) # 1 
+hist(diag(expanded_grm))
+View(expanded_grm)
+
+
+# Here, Will use 27 genotypes lines + 9 not genotyped lines from pheno files with an assumption that these 9 have no relationship with the other 27 (Not biologically true but without any information, we cant assume any other relationships) 
+
+write.csv(expanded_grm, "2022/genotype_data/grm_final.csv")
+
+```
+
+ 

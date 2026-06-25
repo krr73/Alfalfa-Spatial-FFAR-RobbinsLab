@@ -1,0 +1,169 @@
+---
+title: "Plots for Manuscript"
+author: "Dinesh Ghimire"
+date: "2026-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+HEATMAPS
+
+
+
+2023 NMSU
+```{r}
+# this file has sptial effects from all flights and harvest in nor22
+spatial_blup_nmsu22_nor_GNDVI_scaled <- read.csv("2022/MSI_data/output_files/scaled_spatial_blups_GNDVI_nor_22.csv")
+
+
+
+### 2023 ### 
+# this file has sptial effects from all flights and harvest in nor23
+spatial_blup_nmsu23_nor_GNDVI_scaled <- read.csv("2023/MSI_data/output_files/scaled_spatial_blups_GNDVI_nor_23.csv")
+colnames(spatial_blup_nmsu23_nor_GNDVI_scaled)
+
+# lets make sideways square shaped graph of gndvi 152, yld2, and PEE 
+nmsu23_nor_pheno <- read.csv("2023/MSI_data/output_files/NMSU23_nor_Phenotypic_file_both_MSI_harvest_with_PEE.csv") %>%
+  select(-X, -X.1)
+
+# now take columns gndvi 152 and yld2 from spatial_blup_nmsu23_nor_GNDVI_scaled and PEE_153 from nmsu23_nor_pheno. then scale all to same and then layout heatmap to compare spatial yield vs autoregressive spatial effects vs PEE
+
+
+
+
+
+### =========================================================
+### Compare spatial patterns from:
+### 1. AR spatial effects for GNDVI_152
+### 2. AR spatial effects for Yield 2
+### 3. RR-derived PEE_153
+### NOR23 trial
+### =========================================================
+
+library(tidyverse)
+library(patchwork)
+
+# Read files
+spatial_blup_nmsu23_nor_GNDVI_scaled <- read.csv("2023/MSI_data/output_files/scaled_spatial_blups_GNDVI_nor_23.csv") # to get GNDVI_152 spatial effects from AR model as well as yield spatial effects... 
+nmsu23_nor_pheno <- read.csv("2023/MSI_data/output_files/NMSU23_nor_Phenotypic_file_both_MSI_harvest_with_PEE.csv") %>%
+  select(-X, -X.1) # to get PEE and raw_yield
+
+
+# Create plotting dataframe and scale all variables to common units
+heat_df_nmsu23_nor <- data.frame(
+  Row = nmsu23_nor_pheno$Row,
+  Range = nmsu23_nor_pheno$Range,
+  YLD2 = as.numeric(scale(nmsu23_nor_pheno$yld2)),
+  AR_YLD2 = as.numeric(scale(spatial_blup_nmsu23_nor_GNDVI_scaled$yld2)),
+  AR_GNDVI152 = as.numeric(scale(spatial_blup_nmsu23_nor_GNDVI_scaled$gndvi_152)),
+  PEE_153 = as.numeric(scale(nmsu23_nor_pheno$PEE_153)))
+
+# Common color scale across all panels
+lims_nmsu23_nor <- range( c(heat_df_nmsu23_nor$YLD2, heat_df_nmsu23_nor$AR_YLD2, heat_df_nmsu23_nor$AR_GNDVI152, heat_df_nmsu23_nor$PEE_153), na.rm = TRUE)
+
+# Heatmap function
+make_heatmap_nmsu23_nor <- function(df_nmsu23_nor, value, title){
+  ggplot(df_nmsu23_nor, aes(x = Range, y = Row, fill = .data[[value]])) +
+    geom_tile() +
+    scale_fill_gradient2(
+      low = "blue",
+      mid = "white",
+      high = "red",
+      midpoint = 0,
+      limits = lims_nmsu23_nor,
+      name = NULL
+    ) +
+    coord_equal() +
+    scale_y_reverse() +
+    labs(title = title, x = "Range", y = "Row") +
+    theme_bw(base_size = 16) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 18),
+      axis.text = element_text(color = "black"),
+      legend.position = "right" )}
+
+p1_nmsu23_nor <- make_heatmap_nmsu23_nor( heat_df_nmsu23_nor,"YLD2","Yield")
+
+p2_nmsu23_nor <- make_heatmap_nmsu23_nor( heat_df_nmsu23_nor,"AR_YLD2","Yield")
+
+p3_nmsu23_nor <- make_heatmap_nmsu23_nor(heat_df_nmsu23_nor,"AR_GNDVI152","AR")
+
+p4_nmsu23_nor <- make_heatmap_nmsu23_nor(heat_df_nmsu23_nor,"PEE_153", "RR")
+
+combined_heatmaps_nmsu23_nor <-(p1_nmsu23_nor + p2_nmsu23_nor + p3_nmsu23_nor + p4_nmsu23_nor) +
+  plot_layout(ncol = 4, guides = "collect") &
+  theme(legend.position = "right")
+
+combined_heatmaps_nmsu23_nor
+
+ggsave( filename = "Heatmap_Yield2_AR_RR_Comparison_NOR23_NMSU.png", plot = combined_heatmaps_nmsu23_nor,path = "2023/output_images",width = 15,height = 5,dpi = 400)
+```
+
+
+
+next also see if we need, to comapre with original yield.. 
+
+PEE better match with original yield so lets include that... 
+```{r}
+# Read files
+spatial_blup_nmsu23_nor_GNDVI_scaled <- read.csv("2023/MSI_data/output_files/scaled_spatial_blups_GNDVI_nor_23.csv") # to get GNDVI_152 spatial effects from AR model as well as yield spatial effects... 
+nmsu23_nor_pheno <- read.csv("2023/MSI_data/output_files/NMSU23_nor_Phenotypic_file_both_MSI_harvest_with_PEE.csv") %>%
+  select(-X, -X.1) # to get PEE and raw_yield
+
+
+# Create plotting dataframe and scale all variables to common units
+heat_df_nmsu23_nor <- data.frame(
+  Row = nmsu23_nor_pheno$Row,
+  Range = nmsu23_nor_pheno$Range,
+  YLD2 = as.numeric(scale(nmsu23_nor_pheno$yld2)),
+  AR_GNDVI152 = as.numeric(scale(spatial_blup_nmsu23_nor_GNDVI_scaled$gndvi_152)),
+  PEE_153 = as.numeric(scale(nmsu23_nor_pheno$PEE_153)))
+
+# Common color scale across all panels
+lims_nmsu23_nor <- range( c(heat_df_nmsu23_nor$YLD2, heat_df_nmsu23_nor$AR_GNDVI152, heat_df_nmsu23_nor$PEE_153), na.rm = TRUE)
+
+# Heatmap function
+make_heatmap_nmsu23_nor <- function(df_nmsu23_nor, value, title){
+  ggplot(df_nmsu23_nor, aes(x = Range, y = Row, fill = .data[[value]])) +
+    geom_tile() +
+    scale_fill_gradient2(
+      low = "blue",
+      mid = "white",
+      high = "red",
+      midpoint = 0,
+      limits = lims_nmsu23_nor,
+      name = NULL) +
+    coord_equal() +
+    scale_y_reverse() +
+    labs(title = title, x = "Range", y = "Row") +
+    theme_bw(base_size = 16) +
+    theme(
+  plot.title = element_text(face = "bold", hjust = 0.5, size = 20),
+  axis.text = element_text(size = 18, color = "black"),
+  axis.title = element_text(size = 20, face = "bold"),
+  legend.title = element_text(size = 18, face = "bold"),
+  legend.text = element_text(size = 16),
+  legend.position = "right") }
+
+
+
+p1_nmsu23_nor <- make_heatmap_nmsu23_nor( heat_df_nmsu23_nor,"YLD2","Yield")
+
+p2_nmsu23_nor <-  make_heatmap_nmsu23_nor(heat_df_nmsu23_nor,"AR_GNDVI152","AR")
+
+p3_nmsu23_nor <- make_heatmap_nmsu23_nor(heat_df_nmsu23_nor,"PEE_153", "RR")
+
+combined_heatmaps_nmsu23_nor <-(p1_nmsu23_nor + p2_nmsu23_nor + p3_nmsu23_nor ) +
+  plot_layout(ncol = 4, guides = "collect") &
+  theme(legend.position = "right")
+
+combined_heatmaps_nmsu23_nor
+
+ggsave( filename = "Heatmap_rawYield2_AR_RR_Comparison_NOR23_NMSU.png", plot = combined_heatmaps_nmsu23_nor,path = "2023/output_images",width = 15,height = 10,dpi = 400)
+```
+

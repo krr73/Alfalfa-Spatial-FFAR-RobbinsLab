@@ -1,0 +1,1176 @@
+---
+title: "2022_NDVI_processing"
+author: "Dinesh Ghimire"
+date: "2025-06-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+This script is for processing NDVI data from imagebreed and yield data. Each block is usually for a different field trial i.e. treatments here. The growing degree days (GDD) are calculated here since the imagebreed GDD feature does not work for a crop (alfalfa) with multiple harvests, where we reset the GDD after each harvest. 
+
+#Libraries
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,etc..) particularly helpful. I'd be familiar with those before using this script
+# List of required packages
+required_packages <- c("dplyr", "lme4", "tidyr", "ggplot2", "readxl", "stringr")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NMSU"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NMSU 
+#below is what I get when I call getwd. Just check to make sure that the root for this script is the base of the github project, sometimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa_NMSU"
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If something is misssing please let me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NMSU cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+
+I am analyzing New Mexico State University data. 
+# NMSU
+# NMSU files
+## NMSU 2022
+```{r Reading in the files and saving into shorter named file}
+#normal irrigation
+nmsu22_normal<-read.csv("2022/MSI_data/original_files/MSI_NMSU22_Normal_irrigation.csv")
+
+```
+
+# 1. At first dealing with Normal treatment
+
+
+### No need of weather data for spatial work but in case need to do random regression, processing it as well to get GDD. Check metadata readme_weather.txt for details on how and where to get weather files.
+
+## Growing Degree Days (GDD) discussion
+
+- The standard GDD formula is:
+
+$$ GDD = \max\left(\frac{T_{max} + T_{min}}{2} - T_{base}\right) $$
+
+- Daily GDD calculation with 5 as base temperature ((Sanderson, 1992),(Sharratt et al., 1989), NMSU extension and UMN extension documents).
+- Alfalfa is a cool season crop and thus it doesn't always thrive when temperatures are too high. There is no strict maximum temperature limit but most commonly cutoff of 90F or 32.2 is used (Bruce Anderson, 2018, UNL extension)
+- Plants don't grow when temperatures are below their base temperature (T_base). so if tmax + tmin /2 is less than Tbase which is negative (meaning no growth), GDD is corrected to be 0. But if select both tmax and tmin to be more than 5 as below, GDD is always positive. 
+- from a agronomy fact sheet #112 article from Cornell: For many crops and pests, no upper limit is applied. However, development of some species stops or slows significantly above certain temperatures. If the average daily temperature is below the base temperature, no heat units are accumulated (GDD=0). If the maximum daily temperature is above the maximum temperature threshold for the species, the daily maximum temperature is set at the maximum temperature threshold. 
+- for growing season: 
+  - in NY, it range from march 1st to Nov 3rd.
+  - But in New Mexico, Christopher responded that "early February through mid-November (or the date of the last forage yield harvest since at least one year's data ended in late October due to early freeze event)." so Feb 7th to Nov. 15 usually BUT FOR 2022, early harvest on 102122 due to freezing.
+
+
+For this chunk, need to make sure year and weather details (units) are correct, set up min, max and base temperature, find out harvest dates, make intervals, based on that calculate GDD for each harvest interval because in alfalfa, the GDD reset to 0 after harvest (assume so as there is no overground biomass after harvest). Thus after each harvest, GDD restart from 0. 
+
+```{r Calculating GDD and then divide the season according to harvest intervals}
+#read in weather data. I only downloaded for NMSU (Farmington, NM 87401) with weather station number (USC00293142) for Farmington Ag science center.
+# weather data was imported from https://www.ncdc.noaa.gov/cdo-web/ OR more specifically https://www.ncei.noaa.gov/cdo-web/datatools/findstation 
+
+# all data is in metric/Celsius. 
+# I need to filter the date range encompassing of all flights. Because in the weather file that I downloaded (NMSU_2021_2023_weather.csv), I have data from January 1st of 2021 to Dec 31st of 2023. 
+# thus for 2022, i need to filter between flights data. for example in NY we start with March 1st through Nov 3rd as the growing season because from Nov 3 to march is considered as winter dormant phase. But for NMSU, I have asked Chris to verify this range. He responded that "early February through mid-November (or the date of the last forage yield harvest since at least one year's data ended in late October due to early freeze event)." so Feb 7th to Nov. 15 usually. 
+# for 2022, end date is not Nov. mid because had to harvest early due to freezing even so Oct 21 here.
+
+#I started the first growing degree day Feb 7th and the october 21 (last day of harvest.
+#to calculate the Growing degree days(GDD), I determined the base temperature to be 5 Celsius (literature review). #for filtering out, the min temp of 5 and the max to be 32.2, and calculated accordingly. 
+
+# here we are filtering the weather data that falls within the specified time frame (Feb 7 to Oct 21 for 2022 in nmsu22_nom), then calculating GDD based on filtering for each day.
+nmsu22_wd <- read.csv("2022/meta_data/NMSU_2021_2023_weather.csv") %>% # read data file
+  filter(STATION == "USC00293142") %>%  # Same station (Farmington, NM) or change if needed
+  dplyr::select(DATE, TMAX, TMIN) %>%
+  mutate(
+    DATE = as.Date(DATE, format = "%Y-%m-%d"),  # Ensure correct date format
+    TMAX = ifelse(is.na(TMAX), 5, TMAX),  # Replace NA with base temp (5°C)
+    TMIN = ifelse(is.na(TMIN), 5, TMIN)   # Same for TMIN
+  ) %>%
+  filter(between(DATE, as.Date("2022-02-07"), as.Date("2022-10-21"))) %>%  # 2022 date range
+  mutate(
+    # Cap temperatures for GDD calculation (alfalfa-specific thresholds)
+    TMAX = ifelse(TMAX > 5, TMAX, 5),  # Ensure TMAX ≥ 5°C
+    TMAX = ifelse(TMAX < 32.2, TMAX, 5),  # Cap TMAX at 32.2°C
+    TMIN = ifelse(TMIN > 5, TMIN, 5)  # Ensure TMIN ≥ 5°C
+  ) %>%
+  mutate(
+    GDD_per_day = (TMAX + TMIN) / 2 - 5  # Daily GDD calculation with 5 as base temperature ((Sanderson, 1992), NMSU extension and UMN extension documents)
+  )
+
+#add a new column day by converting from date format to days of year or julian days (means which day of the year from 1 to 365.)
+nmsu22_wd$doy<-as.numeric(format(nmsu22_wd$DATE, "%j")) # doy meaning days of the year
+# its same for both treatments for same year though.
+
+
+
+#harvest dates for NMSU Normal 2022
+#determination of GDD for yield harvest dates
+#see 2022/GroundTruth_data/Normal_Irrigation section files for harvest dates
+
+#harvest dates are 6 ( NM have more harvest dates than NY because of weather)
+# 4/28, 6/1, 6/30, 7/27, 9/2, 10/21
+#after harvest the GDD calculation resets for the next harvest. I calculate the GDD up to and including the harvest day (makes it simple)
+# keep in mind we have 02/07 as a first date and 10/21 as last date of the season.
+
+#1. calculating GDD from start of the season up to the first harvest i.e. from 2022-02-07 we set above to 2022-04-28 (1st harvest)
+nmsu22_wd %>% filter(between(DATE,as.Date("2022-02-07"),as.Date("2022-04-28"))) %>% summarize(GDD=sum(GDD_per_day))
+# now similarly for rest of the intervals
+# Interval 2: After 1st harvest to 2nd harvest (04/29–06/01)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-04-29"), as.Date("2022-06-01"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 3: After 2nd harvest to 3rd harvest (06/02–06/30)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-06-02"), as.Date("2022-06-30"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 4: After 3rd harvest to 4th harvest (07/01–07/27)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-07-01"), as.Date("2022-07-27"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 5: After 4th harvest to 5th harvest (07/28–09/02)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-07-28"), as.Date("2022-09-02"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 6: After 5th harvest to 6th harvest (09/03–10/21)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-09-03"), as.Date("2022-10-21"))) %>% summarize(GDD = sum(GDD_per_day))
+
+#not valid for 2022 data: 
+  # After last harvest to end of season (10/22–11/03): we don't actually need this cause we can just do > GDD after last harvest above
+  # nmsu22_wd %>% filter(between(DATE, as.Date("2022-10-22"), as.Date("2022-11-03"))) %>% summarize(GDD = sum(GDD_per_day))
+
+
+# Check day of year for harvests
+format(as.Date("2022-04-28"), "%j")  # Harvest 1 → 118 days because J for Julian day if the day of the year.
+format(as.Date("2022-06-01"), "%j")  # Harvest 2 → 152
+format(as.Date("2022-06-30"), "%j")  # Harvest 3 → 181
+format(as.Date("2022-07-27"), "%j")  # Harvest 4 → 208
+format(as.Date("2022-09-02"), "%j")  # Harvest 5 → 245
+format(as.Date("2022-10-21"), "%j")  # Harvest 6 → 294
+
+# Now calculate cumulative GDD using day-of-year (DOY)
+
+# GDD1: Start to first harvest (DOY < 119, because 1st harvest is 118th day so to filter upto 118th day, <119)
+nmsu22.GDD1 <- nmsu22_wd %>%
+  filter(doy < 119) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD2: 119–152 (04/29–06/01)
+nmsu22.GDD2 <- nmsu22_wd %>%
+  filter(doy %in% 119:152) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD3: 153–181 (06/02–06/30)
+nmsu22.GDD3 <- nmsu22_wd %>%
+  filter(doy %in% 153:181) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD4: 182–208 (07/01–07/27)
+nmsu22.GDD4 <- nmsu22_wd %>%
+  filter(doy %in% 182:208) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD5: 209–245 (07/28–09/02)
+nmsu22.GDD5 <- nmsu22_wd %>%
+  filter(doy %in% 209:245) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD6: 246–294 (09/03–10/21)
+nmsu22.GDD6 <- nmsu22_wd %>%
+  filter(doy %in% 246:294) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+##this "end" is GDD for flights after the last harvest, might be useful to see how they compare to dormancy ratings: GDD after last harvest (295–307)
+#not valid for 2022 data: nmsu22.GDDend <- nmsu22_wd %>% filter(doy > 294) %>% mutate(GDD_sum = cumsum(GDD_per_day)) %>%  select(doy, GDD_sum)
+
+# Combine all intervals together ( 7 intervals together)
+#and check this file to make sure that the GDD resests after harvest doy dates
+
+nmsu22_nor_GDD_sum <- rbind(nmsu22.GDD1, nmsu22.GDD2, nmsu22.GDD3, 
+                        nmsu22.GDD4, nmsu22.GDD5, nmsu22.GDD6)
+# View(nmsu22_GDD_sum)
+write.csv(nmsu22_nor_GDD_sum,file =  "2022/meta_data/NMSU_22_normal_doy_GDD_sum.csv") # can not be used for both normal and ET treatment because the harvest dates are different.
+
+```
+
+
+
+## NMSU Normal Irrigation 2022
+
+### Processing huge data from ImageBreed into relevant indices for reducing size and removing unnecessary columns
+  ### from imagebreed, we can get Blue, Green, Red (RGB) plus NIR bands, and some indices like CCCI, TGI, VARI, NDVI,and NDRE.
+  
+061225: kelly suggested to include other VI's as well. Went and looked at Ranjita's paper. Found out it's worth checking GNDVI which seems to be doing good job. So lets include GNDVI as well. first need to calculate GNDVI which is the ratio of (NIR-green)/(NIR+green). 
+
+```{r Processing huge data from ImageBreed into NDVI, NDRE and GNDVI}
+# Step 1: Select NDVI, NDRE, and GNDVI-related columns
+nmsu22_nor <- nmsu22_normal %>%
+  select(
+    plotNumber, germplasmName, replicate, rowNumber, colNumber,
+    matches("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Green..515.600nm..Green.Denoised.Original.Image.day"),
+    matches("Mean.Pixel.Value.NIR..780.3000nm..NIR.Denoised.Original.Image.day")
+  ) %>%
+  select(-contains("Harmonic")) %>%
+  pivot_longer(cols = 6:ncol(.), names_to = "name", values_to = "value")
+
+
+
+# Step 2: Extract GNDVI from Green and NIR values
+gndvi <- nmsu22_nor %>%
+  filter(grepl("Green.*Original.Image.day|NIR.*Original.Image.day", name)) %>%
+  mutate(
+    band_type = case_when(
+      grepl("Green", name) ~ "Green",
+      grepl("NIR", name) ~ "NIR"
+    ),
+    doy = as.numeric(str_extract(name, "(?<=Image\\.day\\.)\\d+\\.?\\d*"))
+  ) %>%
+  select(-name) %>%
+  pivot_wider(names_from = band_type, values_from = value) %>%
+  mutate(
+    value = (NIR - Green) / (NIR + Green),
+    trait = "GNDVI",
+    name = paste0("GNDVI_", doy)
+  ) %>%
+  select(germplasmName, replicate, plotNumber, rowNumber, colNumber, name, value)
+
+# Step 3: Clean up the original NDVI and NDRE names
+nmsu22_nor <- nmsu22_nor %>%
+  filter(!grepl("Green|NIR", name)) %>%
+  bind_rows(gndvi)
+
+nmsu22_nor$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.", "NDVI_", nmsu22_nor$name)
+nmsu22_nor$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.", "NDRE_", nmsu22_nor$name)
+
+# Step 4: Extract DOY (beacuse GNDVI and other two indices are in different name format, need to use case_when to separate out the formula)
+nmsu22_nor <- nmsu22_nor %>%
+  mutate(
+    trait = str_extract(name, "^[^_]+")
+  ) %>%
+  mutate(
+    doy = case_when(
+      trait == "GNDVI" ~ as.numeric(str_extract(name, "(?<=_)\\d+\\.?\\d*")),
+      TRUE ~ as.numeric(str_extract(name, "(?<=day\\.)\\d+\\.?\\d*"))
+    ),
+    doy = ceiling(doy) # round up to next bigger value
+  )
+
+# Step 5: Assign harvest window categories
+nmsu22_nor$harvest <- "0"
+nmsu22_nor[nmsu22_nor$doy <= 118, ]$harvest <- "1"
+nmsu22_nor[nmsu22_nor$doy >= 119 & nmsu22_nor$doy <= 152, ]$harvest <- "2"
+nmsu22_nor[nmsu22_nor$doy >= 153 & nmsu22_nor$doy <= 181, ]$harvest <- "3"
+nmsu22_nor[nmsu22_nor$doy >= 182 & nmsu22_nor$doy <= 208, ]$harvest <- "4"
+nmsu22_nor[nmsu22_nor$doy >= 209 & nmsu22_nor$doy <= 245, ]$harvest <- "5"
+nmsu22_nor[nmsu22_nor$doy >= 246 & nmsu22_nor$doy <= 294, ]$harvest <- "6"
+nmsu22_nor[nmsu22_nor$doy > 294, ]$harvest <- "end"
+
+# Step 6: Create trait column (NDVI, NDRE, GNDVI)
+nmsu22_nor$trait <- vapply(strsplit(nmsu22_nor$name, "_", fixed = TRUE), `[`, "", 1)
+
+
+
+# now we are going to join this MSI or image file with GDD file we created in previous chunk
+ #then also filter out plots that are not part of this particular analysis as well as check plots
+
+# Step 7: Merge with GDD file from previous chunk: Merging MSI file with GDD file
+nmsu22_nor <- nmsu22_nor %>%
+  left_join(nmsu22_GDD_sum, by = "doy") %>%
+  arrange(doy, trait, plotNumber) %>%
+  mutate(loc = "NMSU-NOR", year = "2022")
+
+# later on while merging two files found that range or column number in MSI file is swapped, so changing that here as well. 
+nmsu22_nor$colNumber <- 9 - nmsu22_nor$colNumber
+
+# Step 8: Export final file
+write.csv(nmsu22_nor, file = "2022/MSI_data/Output_files/nmsu_normal_22_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv", row.names = FALSE)
+
+```
+
+
+Merging MSI with harvest data file (ground truth): first need to merge harvest data files. Because i have 6 separate harvest data files for 6 harvests.
+
+we have received 6 separate harvest files, lets merge all into one. 
+```{r Merge harvest data files: 6 harvests into 1 file}
+## Load each file and select ONLY required columns
+nmsu22_nor_h1 <- read_excel("2022/GroundTruth_data/Normal_Irrigation/2019 Normal AVT data H1 4_28_22.xlsx", skip = 1) %>% select(row, range, Plot, Rep, Entry, yld1 = `Yield (lbs)`)
+
+nmsu22_nor_h2 <- read_excel("2022/GroundTruth_data/Normal_Irrigation/2019 Normal AVT data H2 6_1_22.xlsx", skip = 1) %>% select(row, range, Plot, Rep, Entry, yld2 = `Yield (lbs)`)
+
+nmsu22_nor_h3 <- read_excel("2022/GroundTruth_data/Normal_Irrigation/2019 Normal AVT data H3 6_30_22.xlsx", skip = 1) %>%  select(row, range, Plot, Rep, Entry, yld3 = `Yield (fw FQ)`)
+
+nmsu22_nor_h4 <- read_excel("2022/GroundTruth_data/Normal_Irrigation/2019 Normal AVT data H4 7_27_22.xlsx", skip = 1) %>% select(row, range, Plot, Rep, Entry, yld4 = `Yield (lbs)`)
+
+nmsu22_nor_h5 <- read_excel("2022/GroundTruth_data/Normal_Irrigation/2019 Normal AVT data H5 9_2_22.xlsx", skip = 1) %>%  select(row, range, Plot, Rep, Entry, yld5 = `Yield (lbs)`)
+
+nmsu22_nor_h6 <- read_excel("2022/GroundTruth_data/Normal_Irrigation/2019 Normal AVT data H6 10_21_22.xlsx", skip = 1) %>%  select(row, range, Plot, Rep, Entry, yld6 = `Yield (lbs)`)
+
+## Merge with only the specified columns. 
+## merge all files by row, range, plot, rep, entry and new yield columns as yld11, yld2, yld3, yld4, yld5, yld6
+
+nmsu22_nor_yld <- nmsu22_nor_h1 %>%
+  left_join(nmsu22_nor_h2, by = c("row", "range", "Plot", "Rep", "Entry")) %>%
+  left_join(nmsu22_nor_h3, by = c("row", "range", "Plot", "Rep", "Entry")) %>%
+  left_join(nmsu22_nor_h4, by = c("row", "range", "Plot", "Rep", "Entry")) %>%
+  left_join(nmsu22_nor_h5, by = c("row", "range", "Plot", "Rep", "Entry")) %>%
+  left_join(nmsu22_nor_h6, by = c("row", "range", "Plot", "Rep", "Entry"))
+
+# View(nmsu22_nor_yld) # contains only row, range, plot, rep, entry and yield data for each harvest
+
+#now saving this merged file for future use.
+write.csv(nmsu22_nor_yld, file = "2022/GroundTruth_data/Normal_Irrigation/nmsu22_nor_yield_merged.csv")
+
+```
+
+
+
+Processing Both MSI and Yield data to merge
+```{r Processing Both MSI and Yield data to merge}
+#1. Processing MSI first
+  # load MSI data and process it
+nmsu22_nor <- read.csv("2022/MSI_data/Output_files/nmsu_normal_22_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv") # longer version
+unique(nmsu22_nor$colNumber)
+nmsu22_nor$colNumber[1:20]
+  ### however the colnumber doesn't match with yield data. Went back to looking at maps and ImageBreed. Found out that ImageBreed most likely only has column number starting from left to right in the map BUT according to field trial map, this trial has rnage from right to left, rows from top to bottom and rep again from right to left. Thus we need to swap column number i.e. 8 becomes 1, 7~2, 6~3, 5~4, 4~5, 3~6, 2~7, 1~8... 
+
+unique(nmsu22_nor$replicate)
+
+nmsu22_nor$range <- 9 - nmsu22_nor$colNumber # subtracting everthing by 9 swaps that. 
+nmsu22_nor$colNumber <-  NULL # remove this original wrong column number
+# now lets rename the columns
+colnames(nmsu22_nor)
+nmsu22_nor <- nmsu22_nor %>% 
+  rename(Germplasm = germplasmName, Row = rowNumber, Range = range, Plot = plotNumber, Rep = replicate )
+
+# From now we are making data file easier for analysis and modeling by pivot wider function for VI's and only necessary columns
+nmsu22_nor_wider <- nmsu22_nor %>%
+  mutate(doy = as.numeric(doy)) %>%
+  pivot_wider(
+    id_cols = c(Germplasm, Rep, Plot, Row, Range),  # select all necessary columns
+    names_from = c(trait, doy),
+    values_from = value,
+    names_sep = "_"
+  )
+nmsu_normal_22_MSI <- nmsu22_nor_wider # this is the imaging data file
+
+ ## saving this file
+write.csv(nmsu_normal_22_MSI, file = "2022/MSI_data/Output_files/nmsu_normal_22_MSI.csv")
+
+# separating out NDVI columns and NDRE columns as separate data file and save them.
+nmsu_normal_22_MSI <- read.csv("2022/MSI_data/Output_files/nmsu_normal_22_MSI.csv")
+# NDVI columns
+ndvi_22 <- nmsu_normal_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDVI_"))
+write.csv(ndvi_22, "2022/MSI_data/Output_files/nmsu_normal_22_NDVI.csv", row.names = FALSE)
+
+# NDRE columns
+ndre_22 <- nmsu_normal_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDRE_"))
+write.csv(ndre_22, "2022/MSI_data/Output_files/nmsu_normal_22_NDRE.csv", row.names = FALSE)
+
+# GNDVI columns
+gndvi_22 <- nmsu_normal_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("GNDVI"))
+write.csv(gndvi_22, "2022/MSI_data/Output_files/nmsu_normal_22_GNDVI.csv", row.names = FALSE)
+
+ ## checked all three files have same columns numbers
+
+
+#2. Yield data: now lets work with yield data so we can merge MSI + yield
+ ## Rename MSI file to match with yield data file
+nmsu22_nor_yld <- read.csv("2022/GroundTruth_data/Normal_Irrigation/nmsu22_nor_yield_merged.csv")
+colnames(nmsu22_nor_yld)
+
+nmsu22_nor_yld <- nmsu22_nor_yld %>% 
+  rename(Row = row, Range = range) # Plot and Rep are already same as MSI data columns
+
+# 3: Join MSI with yield data
+    ## We now join NDVI/NDRE with harvest data (nmsu22_nor_yld) using rowNumber, and colNumber.
+nmsu22_nor_combined <- nmsu_normal_22_MSI %>%
+  left_join(nmsu22_nor_yld, by = c( "Row", "Range", "Rep", "Plot"))
+
+# lets just move yield columns forward 
+ nmsu22_nor_combined <- nmsu22_nor_combined %>%
+   dplyr::select(
+    1:6,                          # Keep the first 5 columns as-is
+    103:ncol(.),                   # Move columns 70 onward next
+    7:102                        # Then include the NDRE/NDVI columns
+   )
+colnames(nmsu22_nor_combined)
+# lets remove serial number columns (X.x, X.y and Entry too)
+nmsu22_nor_combined$X.x <- NULL
+nmsu22_nor_combined$X.y <- NULL
+nmsu22_nor_combined$Entry <- NULL
+colnames(nmsu22_nor_combined)
+
+
+# lets check if Plot and Reps are also same between two datasets. if yes, we will combine by that as well.
+ # colnames(nmsu22_nor_combined[1:10])
+
+# Create a quick logical check between corresponding columns
+# same_plot <- nmsu22_nor_combined$Plot.x == nmsu22_nor_combined$Plot.y
+# same_plot
+# same_rep  <- nmsu22_nor_combined$Rep.x == nmsu22_nor_combined$Rep.y
+# same_rep
+ #both true all, so same. thus went above to left_join part and added (Rep and Plot as well)
+
+# Summary
+#table(same_plot, same_rep)
+
+
+# thus combined file. now final file has Germplasm, Rep, Plot, Row, Rep, NDVI, GNDVI, NDRE, Yield
+
+write.csv(nmsu22_nor_combined, file = "2022/MSI_data/Output_files/nmsu22_nor_combined_phenotypes_MSI.csv")
+
+# manually checked combined file with individual file and it worked.
+
+# now lets save files for each NDVI, NDRE and GNDVI
+# separating out NDVI, NDRE and GNDVI columns as separate data file and save them.
+nmsu22_nor_combined <- read.csv("2022/MSI_data/Output_files/nmsu22_nor_combined_phenotypes_MSI.csv")
+
+```
+
+
+
+# IMP
+Chris confirmed that NUMEX germplasm's can be considered all same, so use same name for all.. also changed in 6th rmd with futher cleaning of data files... 
+```{r}
+nmsu22_nor_combined <- read.csv("2022/MSI_data/Output_files/nmsu22_nor_combined_phenotypes_MSI.csv")
+unique(nmsu22_nor_combined$Germplasm) #24
+
+nmsu22_nor_combined$Germplasm[grepl("^NUMEX_BILL_MELTON", nmsu22_nor_combined$Germplasm)] <- "NUMEX_BILL_MELTON"
+unique(nmsu22_nor_combined$Germplasm) # 22 cz three are merged into 1 ( so 3-1 =2 deduction)
+
+write.csv(nmsu22_nor_combined, file = "2023/MSI_data/Output_files/nmsu22_nor_combined_phenotypes_MSI.csv")
+
+# NDVI columns
+ndvi_22_nor_combined <- nmsu22_nor_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, yld4, yld5, yld6, starts_with("NDVI_"))
+write.csv(ndvi_22_nor_combined, "2022/MSI_data/Output_files/nmsu_normal_22_NDVI_combined.csv", row.names = FALSE)
+
+
+# NDRE columns
+ndre_22_nor_combined <- nmsu22_nor_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, yld4, yld5, yld6, starts_with("NDRE_"))
+write.csv(ndre_22_nor_combined, "2022/MSI_data/Output_files/nmsu_normal_22_NDRE_combined.csv", row.names = FALSE)
+
+# GNDVI columns
+gndvi_22_nor_combined <- nmsu22_nor_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, yld4, yld5, yld6, starts_with("GNDVI"))
+write.csv(gndvi_22_nor_combined, "2022/MSI_data/Output_files/nmsu_normal_22_GNDVI_combined.csv", row.names = FALSE)
+
+```
+
+
+
+```{r}
+model<-lmer(NDVI_144~1+(1|Germplasm),data=nmsu22_nor_combined)
+VarCorr(model) 
+0.011153/(0.011153+0.034057) # 0.25
+
+model_2<-lmer(NDVI_270~1+(1|Germplasm),data=nmsu22_nor_combined)
+VarCorr(model_2) 
+0.015338/(0.015338+0.020049) # 0.43
+
+```
+
+
+
+# understanding data more for making experimental designs
+
+```{r}
+unique(nmsu22_nor_combined$Rep) # 1,2,3,4
+unique(nmsu22_nor_combined$Row) # 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18
+unique(nmsu22_nor_combined$Range) # 1 2 3 4 5 6 7 8
+unique(nmsu22_nor_combined$Germplasm) # 24 unique
+unique(nmsu22_nor_combined$Plot) # 144 unique plots
+
+
+```
+
+
+# check outliers for yield data
+```{r}
+# Fit a linear model
+colnames(nmsu22_nor_combined)
+# Outliers in Yield 1
+model <- lm(yld1 ~ Rep+Row+Range+Germplasm, data = nmsu22_nor_combined, na.action = na.exclude) #model explains ~ 51% (R2= 51%)
+# now calculate residuals based on model
+
+# Calculate residuals
+nmsu22_nor_combined$residuals <- residuals(model, na.action = na.exclude)
+# Standardize the residuals
+nmsu22_nor_combined$residuals_standard <- scale(nmsu22_nor_combined$residuals, center = T, scale = T) 
+# Identify outliers
+outliers <- nmsu22_nor_combined %>% filter(abs(residuals_standard) > 3)
+# Print outliers
+View(outliers)
+
+hist(model$residuals) # looks normal so can use standarized residuals which follow a normal distribution.
+hist(nmsu22_nor_combined$residuals_standard) # looks normal but slightly skewed still can use standarized residuals which follow a normal distribution.
+hist(nmsu22_nor_combined$residuals) # looks normal but slightly skewed still can use standarized residuals which follow a normal distribution.
+
+
+
+# for all yields
+library(dplyr)
+library(purrr)
+
+# Traits
+yield_traits <- paste0("yld", 1:6)
+
+# Function to fit model, calculate residuals, standardize, and extract outliers
+process_outliers <- function(trait, data) {
+  # Build formula dynamically
+  formula <- as.formula(paste(trait, "~ Rep + Row + Range + Germplasm"))
+  
+  # Fit model
+  model <- lm(formula, data = data, na.action = na.exclude)
+  
+  # Get residuals and standardized residuals
+  data[[paste0(trait, "_resid")]] <- residuals(model, na.action = na.exclude)
+  data[[paste0(trait, "_resid_std")]] <- scale(data[[paste0(trait, "_resid")]], center = TRUE, scale = TRUE)
+  
+  # Extract outliers
+  outliers <- data %>% filter(abs(.data[[paste0(trait, "_resid_std")]]) > 3)
+  
+  return(outliers)
+}
+
+# Apply the function to all yield traits
+outlier_list <- map(yield_traits, ~process_outliers(.x, nmsu22_nor_combined))
+
+# Name the list elements for clarity
+names(outlier_list) <- yield_traits
+
+# View outliers for each trait
+
+# plot and standard residual value
+
+#View(outlier_list$yld1) # 239 plot with 3.7
+#View(outlier_list$yld2) # 239 plot with 4.87
+#View(outlier_list$yld3) # 196 plot with -3.3 and 239 plot with value of 3.84
+#View(outlier_list$yld4) # 196 plot with -3.61 and 239 plot with value of 3.77 
+#View(outlier_list$yld5) # 196 plot with -3.33
+#View(outlier_list$yld6) # 196 plot with -3.39 and 233 plot with value of 3.13 
+
+
+# for something closer to 3 are judgement calls but over 3.5 or 4 can be removed. 
+# In summary, plot 196 (SW_9812), 233(NUMEX_BILL_MELTON_CA_2019) and 239 (SW_9812) : are these over 3 bcz these germplasm are superior in terms of production or outliers? No.. the germplasm superiority will be captured in genetic effects when we model that later on. 
+
+```
+
+
+MSI Range of values to check outliers
+```{r MSI Range of values to check outliers}
+colnames(nmsu_nor_combined_22)
+library(dplyr)
+
+# Get column names of interest
+index_cols <- grep("^(GNDVI|NDVI|NDRE)_", colnames(nmsu_nor_combined_22), value = TRUE)
+
+# Calculate min and max for each
+index_summary <- sapply(index_cols, function(col) {
+  vals <- nmsu_nor_combined_22[[col]]
+  c(min = min(vals, na.rm = TRUE), max = max(vals, na.rm = TRUE))
+})
+
+# Convert to data frame
+index_summary_df <- as.data.frame(t(index_summary))
+index_summary_df$Index <- sub("_.*", "", rownames(index_summary_df))
+index_summary_df$Column <- rownames(index_summary_df)
+index_summary_df <- index_summary_df %>%
+  select(Index, Column, Min = min, Max = max)
+
+# View the result
+View(index_summary_df)
+
+#mean 
+
+index_summary_df %>%
+  group_by(Index) %>%
+  summarise(
+    Mean_Min = mean(Min, na.rm = TRUE),
+    Mean_Max = mean(Max, na.rm = TRUE)
+  )
+
+1 GNDVI   0.0555    0.245
+2 NDRE    0.282     0.437
+3 NDVI    0.354     0.536
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################# Early Termination ################################
+
+
+
+
+
+# 2. Now lets process "Early Termination" treatment
+
+## NMSU ET Irrigation 2022
+
+## Step 1: Load ET file
+  
+```{r Reading in the files and saving into shorter named file}
+#early termination
+nmsu22_et<-read.csv("2022/MSI_data/original_files/MSI_NMSU22_ET.csv")
+
+```
+
+## Step 2: GDD calculation: it's similar to normal but because the harvest dates are different slightly, the files will be different.
+
+## Growing Degree Days (GDD) discussion
+
+- The standard GDD formula is:
+
+$$ GDD = \max\left(\frac{T_{max} + T_{min}}{2} - T_{base}\right) $$
+
+- Details above in Normal 
+
+```{r Calculating GDD and then divide the season according to harvest intervals}
+#read in weather data. I only downloaded for NMSU (Farmington, NM 87401) with weather station number (USC00293142) for Farmington Ag science center.
+# same details and weather file as for normal because the external environment is same for both treatments
+# here we are filtering the weather data that falls within the specified time frame (March 1 to November 3 for 2022 in nmsu22_nom), then calculating GDD based on filtering for each day.
+nmsu22_wd <- read.csv("2022/meta_data/NMSU_2021_2023_weather.csv") %>% # read data file
+  filter(STATION == "USC00293142") %>%  # Same station (Aurora, NY) or change if needed
+  dplyr::select(DATE, TMAX, TMIN) %>%
+  mutate(
+    DATE = as.Date(DATE, format = "%Y-%m-%d"),  # Ensure correct date format
+    TMAX = ifelse(is.na(TMAX), 5, TMAX),  # Replace NA with base temp (5°C)
+    TMIN = ifelse(is.na(TMIN), 5, TMIN)   # Same for TMIN
+  ) %>%
+  filter(between(DATE, as.Date("2022-02-07"), as.Date("2022-10-20"))) %>%  # 2022 date range: end date differnet from Normal.
+  mutate(
+    # Cap temperatures for GDD calculation (alfalfa-specific thresholds)
+    TMAX = ifelse(TMAX > 5, TMAX, 5),  # Ensure TMAX ≥ 5°C
+    TMAX = ifelse(TMAX < 5, TMAX, 5),  # Cap TMAX at 32.2°C
+    TMIN = ifelse(TMIN > 5, TMIN, 5)  # Ensure TMIN ≥ 5°C
+  ) %>%
+  mutate(
+    GDD_per_day = (TMAX + TMIN) / 2 - 5  # Daily GDD calculation with 5 as base temperature ((Sanderson, 1992), NMSU extension and UMN extension documents)
+  )
+
+#add a new column day by converting from date format to days of year or julian days (means which day of the year from 1 to 365.)
+nmsu22_wd$doy<-as.numeric(format(nmsu22_wd$DATE, "%j")) # doy meaning days of the year
+
+
+
+#harvest dates for NMSU Normal 2022
+#determination of GDD for yield harvest dates
+#see 2022/GroundTruth_data/Early_Termination section files for harvest dates
+
+#harvest dates are 5 ( NM have more harvest dates than NY because of weather AND NM normal > NM ET)
+# 4/27, 6/1, 6/30, 7/27, 10/20
+#after harvest the GDD calculation resets for the next harvest. I calculate the GDD up to and including the harvest day (makes it simple)
+# keep in mind we have 02/07 as a first date and 10/20 as last date of the season.
+
+#1. calculating GDD from start of the season up to the first harvest i.e. from 2022-02-07 we set above to 2022-04-27 (1st harvest)
+nmsu22_wd %>% filter(between(DATE,as.Date("2022-02-07"),as.Date("2022-04-27"))) %>% summarize(GDD=sum(GDD_per_day))
+# now similarly for rest of the intervals
+# Interval 2: After 1st harvest to 2nd harvest (04/28–06/01)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-04-28"), as.Date("2022-06-01"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 3: After 2nd harvest to 3rd harvest (06/02–06/30)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-06-02"), as.Date("2022-06-30"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 4: After 3rd harvest to 4th harvest (07/01–07/27)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-07-01"), as.Date("2022-07-27"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 5: After 4th harvest to 5th harvest (07/28–10/20)
+nmsu22_wd %>% filter(between(DATE, as.Date("2022-07-28"), as.Date("2022-10-20"))) %>% summarize(GDD = sum(GDD_per_day))
+
+
+#not needed for 2022 data: 
+  # After last harvest to end of season (10/22–11/03): we don't actually need this cause we can just do > GDD after last harvest above
+  # nmsu22_wd %>% filter(between(DATE, as.Date("2022-10-22"), as.Date("2022-11-03"))) %>% summarize(GDD = sum(GDD_per_day))
+
+
+# Check day of year for harvests
+format(as.Date("2022-04-27"), "%j")  # Harvest 1 → 117 days because J for Julian day if the day of the year.
+format(as.Date("2022-06-01"), "%j")  # Harvest 2 → 152
+format(as.Date("2022-06-30"), "%j")  # Harvest 3 → 181
+format(as.Date("2022-07-27"), "%j")  # Harvest 4 → 208
+format(as.Date("2022-10-20"), "%j")  # Harvest 5 → 293
+
+# Now calculate cumulative GDD using day-of-year (DOY)
+
+# GDD1: Start to first harvest (DOY < 118, because 1st harvest is 117th day so to filter upto 117th day, <118)
+nmsu22_et_GDD1 <- nmsu22_wd %>%
+  filter(doy < 118) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD2: 118–152 (04/28–06/01)
+nmsu22_et_GDD2 <- nmsu22_wd %>%
+  filter(doy %in% 118:152) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD3: 153–181 (06/02–06/30)
+nmsu22_et_GDD3 <- nmsu22_wd %>%
+  filter(doy %in% 153:181) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD4: 182–208 (07/01–07/27)
+nmsu22_et_GDD4 <- nmsu22_wd %>%
+  filter(doy %in% 182:208) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD5: 209–293 (07/28–10/20)
+nmsu22_et_GDD5 <- nmsu22_wd %>%
+  filter(doy %in% 209:293) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+#not valid for 2022 data:
+##this "end" is GDD for flights after the last harvest, might be useful to see how they compare to dormancy ratings: GDD after last harvest (293–307)
+#not valid for 2022 data: nmsu22.GDDend <- nmsu22_wd %>% filter(doy > 294) %>% mutate(GDD_sum = cumsum(GDD_per_day)) %>%  select(doy, GDD_sum)
+
+# Combine all intervals together ( 7 intervals together)
+#and check this file to make sure that the GDD resests after harvest doy dates
+
+nmsu22_et_GDD_sum <- rbind(nmsu22_et_GDD1, nmsu22_et_GDD2, nmsu22_et_GDD3, 
+                        nmsu22_et_GDD4, nmsu22_et_GDD5)
+# View(nmsu22_GDD_sum)
+write.csv(nmsu22_et_GDD_sum,file =  "2022/meta_data/NMSU_22_Early_Termination_doy_GDD_sum.csv") # save
+
+```
+
+
+
+
+
+## Step 3: Process MSI and Harvest files in order to merge them at last.
+
+### Processing huge data from ImageBreed into relevant indices for reducing size and removing unnecessary columns
+
+```{r Processing huge data from ImageBreed into NDVI, NDRE and GNDVI}
+# Step 1: Select NDVI, NDRE, and GNDVI-related columns
+nmsu22_et <- nmsu22_et %>%
+  select(
+    plotNumber, germplasmName, replicate, rowNumber, colNumber,
+    matches("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Green..515.600nm..Green.Denoised.Original.Image.day"),
+    matches("Mean.Pixel.Value.NIR..780.3000nm..NIR.Denoised.Original.Image.day")
+  ) %>%
+  select(-contains("Harmonic")) %>%
+  pivot_longer(cols = 6:ncol(.), names_to = "name", values_to = "value") # make sure VI's start from 6th column
+
+
+
+# Step 2: Extract GNDVI from Green and NIR values
+gndvi <- nmsu22_et %>%
+  filter(grepl("Green.*Original.Image.day|NIR.*Original.Image.day", name)) %>%
+  mutate(
+    band_type = case_when(
+      grepl("Green", name) ~ "Green",
+      grepl("NIR", name) ~ "NIR"
+    ),
+    doy = as.numeric(str_extract(name, "(?<=Image\\.day\\.)\\d+\\.?\\d*"))
+  ) %>%
+  select(-name) %>%
+  pivot_wider(names_from = band_type, values_from = value) %>%
+  mutate(
+    value = (NIR - Green) / (NIR + Green),
+    trait = "GNDVI",
+    name = paste0("GNDVI_", doy)
+  ) %>%
+  select(germplasmName, replicate, plotNumber, rowNumber, colNumber, name, value)
+
+# Step 3: Clean up the original NDVI and NDRE names
+nmsu22_et <- nmsu22_et %>%
+  filter(!grepl("Green|NIR", name)) %>%
+  bind_rows(gndvi)
+
+nmsu22_et$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.", "NDVI_", nmsu22_et$name)
+nmsu22_et$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.", "NDRE_", nmsu22_et$name)
+
+# Step 4: Extract DOY (beacuse GNDVI and other two indices are in different name format, need to use case_when to separate out the formula)
+nmsu22_et <- nmsu22_et %>%
+  mutate(
+    trait = str_extract(name, "^[^_]+")
+  ) %>%
+  mutate(
+    doy = case_when(
+      trait == "GNDVI" ~ as.numeric(str_extract(name, "(?<=_)\\d+\\.?\\d*")),
+      TRUE ~ as.numeric(str_extract(name, "(?<=day\\.)\\d+\\.?\\d*"))
+    ),
+    doy = ceiling(doy) # round up to next bigger value
+  )
+
+
+# Step 5: Assign harvest window categories
+nmsu22_et$harvest <- "0"
+nmsu22_et[nmsu22_et$doy <= 117, ]$harvest <- "1"
+nmsu22_et[nmsu22_et$doy >= 118 & nmsu22_et$doy <= 152, ]$harvest <- "2"
+nmsu22_et[nmsu22_et$doy >= 153 & nmsu22_et$doy <= 181, ]$harvest <- "3"
+nmsu22_et[nmsu22_et$doy >= 182 & nmsu22_et$doy <= 208, ]$harvest <- "4"
+nmsu22_et[nmsu22_et$doy >= 209 & nmsu22_et$doy <= 293, ]$harvest <- "5"
+
+# Step 6: Create trait column (NDVI, NDRE, GNDVI)
+nmsu22_et$trait <- vapply(strsplit(nmsu22_et$name, "_", fixed = TRUE), `[`, "", 1)
+
+
+
+# now we are going to join this MSI or image file with GDD file we created in previous chunk
+ #then also filter out plots that are not part of this particular analysis as well as check plots. not needed here
+
+# Step 7: Merge with GDD file from previous chunk: Merging MSI file with GDD file
+nmsu22_et <- nmsu22_et %>%
+  left_join(nmsu22_et_GDD_sum, by = "doy") %>%
+  arrange(doy, trait, plotNumber) %>%
+  mutate(loc = "NMSU-ET", year = "2022")
+
+# later on while merging two files found that range or column number in MSI file is swapped, so changing that here as well. 
+unique(nmsu22_et$colNumber)
+nmsu22_et$colNumber[1:20]
+  ### however the colnumber doesn't match with yield data. Went back to looking at maps and ImageBreed. Found out that ImageBreed most likely only has column number starting from left to right in the map BUT according to field trial map, this trial has rnage from right to left, rows from top to bottom and rep again from right to left. Thus we need to swap column number i.e. 8 becomes 1, 7~2, 6~3, 5~4, 4~5, 3~6, 2~7, 1~8... 
+
+nmsu22_et$colNumber <- 9 - nmsu22_et$colNumber
+
+# Step 8: Export final file
+write.csv(nmsu22_et, file = "2022/MSI_data/Output_files/nmsu_early_termination_22_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv", row.names = FALSE)
+
+# manually check some random plots from original et file and this file ... matches
+
+```
+
+
+
+
+Merging MSI with harvest data file (ground truth): 
+ - first need to merge harvest data files. Because i have 5 separate harvest data files for 6 harvests.
+
+we have received 6 separate harvest files, lets merge all into one. 
+```{r Merge harvest data files: 6 harvests into 1 file}
+## Load each file and select ONLY required columns
+nmsu22_et_h1 <- read_excel("2022/GroundTruth_data/Early_Termination/2019 ET AVT data H1 4_27_22.xlsx", skip = 1) %>% select(row, range, Plot, Rep, Entry, yld1 = `Yield (lbs)`)
+
+nmsu22_et_h2 <- read_excel("2022/GroundTruth_data/Early_Termination/2019 ET AVT data H2 6_1_22.xlsx", skip = 1) %>% select(row, range, Plot, Rep, Entry, yld2 = `Yield (lbs)`)
+
+nmsu22_et_h3 <- read_excel("2022/GroundTruth_data/Early_Termination/2019 ET AVT data H3 6_30_22.xlsx", skip = 1) %>%  select(row, range, Plot, Rep, Entry, yld3 = `Yield (lbs)`)
+
+nmsu22_et_h4 <- read_excel("2022/GroundTruth_data/Early_Termination/2019 ET AVT data H4 7_27_22.xlsx", skip = 1) %>% select(row, range, Plot, Rep, Entry, yld4 = `Yield (lbs)`)
+ ## fourth harvest has very low yield
+
+nmsu22_et_h5 <- read_excel("2022/GroundTruth_data/Early_Termination/2019 ET AVT data H6 10_20_22.xlsx", skip = 1) %>%  select(row, range, Plot, Rep, Entry, yld5 = `Yield (lbs)`)
+
+## Merge with only the specified columns. 
+## merge all files by row, range, plot, rep, entry and new yield columns as yld11, yld2, yld3, yld4, yld5, yld6
+
+nmsu22_et_yld <- nmsu22_et_h1 %>%
+  left_join(nmsu22_et_h2, by = c("row", "range", "Plot", "Rep", "Entry")) %>%
+  left_join(nmsu22_et_h3, by = c("row", "range", "Plot", "Rep", "Entry")) %>%
+  left_join(nmsu22_et_h4, by = c("row", "range", "Plot", "Rep", "Entry")) %>%
+  left_join(nmsu22_et_h5, by = c("row", "range", "Plot", "Rep", "Entry"))
+
+# View(nmsu22_et_yld) # contains only row, range, plot, rep, entry and yield data for each harvest
+nmsu22_et_yld <- nmsu22_et_yld %>% 
+  rename(Row = row, Range = range) # Plot and Rep are already same as MSI data columns
+
+#now saving this merged file for future use.
+write.csv(nmsu22_et_yld, file = "2022/GroundTruth_data/Early_Termination/nmsu22_et_yield_merged.csv")
+
+```
+
+
+
+Processing Both MSI and Yield data to merge
+```{r Processing Both MSI and Yield data to merge}
+#1. Processing MSI first
+  # load MSI data and process it
+nmsu22_et <- read.csv("2022/MSI_data/Output_files/nmsu_early_termination_22_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv") # longer version
+unique(nmsu22_et$colNumber) # we fixed column number issue above by swapping order from 8 to 1 into 1 to 8.
+unique(nmsu22_et$replicate)
+
+# now lets rename the columns
+colnames(nmsu22_et)
+nmsu22_et <- nmsu22_et %>% 
+  rename(Germplasm = germplasmName, Row = rowNumber, Range = colNumber, Plot = plotNumber, Rep = replicate )
+
+# From now we are making data file easier for analysis and modeling by pivot wider function for VI's and only necessary columns
+nmsu22_et_wider <- nmsu22_et %>%
+  mutate(doy = as.numeric(doy)) %>%
+  pivot_wider(
+    id_cols = c(Germplasm, Rep, Plot, Row, Range),  # select all necessary columns
+    names_from = c(trait, doy),
+    values_from = value,
+    names_sep = "_"
+  )
+nmsu_et_22_MSI <- nmsu22_et_wider # this is the imaging data file
+
+ ## saving this file
+write.csv(nmsu_et_22_MSI, file = "2022/MSI_data/Output_files/nmsu_early_termination_22_MSI.csv")
+
+# separating out NDVI columns and NDRE columns as separate data file and save them.
+nmsu_et_22_MSI <- read.csv("2022/MSI_data/Output_files/nmsu_early_termination_22_MSI.csv")
+# NDVI columns
+ndvi_22 <- nmsu_et_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDVI_"))
+write.csv(ndvi_22, "2022/MSI_data/Output_files/nmsu_early_termination_22_NDVI.csv", row.names = FALSE)
+
+# NDRE columns
+ndre_22 <- nmsu_et_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDRE_"))
+write.csv(ndre_22, "2022/MSI_data/Output_files/nmsu_early_termination_22_NDRE.csv", row.names = FALSE)
+
+# GNDVI columns
+gndvi_22 <- nmsu_et_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("GNDVI"))
+write.csv(gndvi_22, "2022/MSI_data/Output_files/nmsu_early_termination_22_GNDVI.csv", row.names = FALSE)
+
+ ## checked all three files have same columns numbers
+
+
+#2. Yield data: now lets work with yield data so we can merge MSI + yield
+ ## Rename MSI file to match with yield data file
+nmsu22_et_yld <- read.csv("2022/GroundTruth_data/Early_Termination/nmsu22_et_yield_merged.csv")
+colnames(nmsu22_et_yld)
+
+nmsu22_et_yld <- nmsu22_et_yld %>% 
+  rename(Row = row, Range = range) # Plot and Rep are already same as MSI data columns
+
+# 3: Join MSI with yield data
+    ## We now join NDVI/NDRE with harvest data (nmsu22_et_yld) using rowNumber, and colNumber.
+nmsu22_et_combined <- nmsu_et_22_MSI %>%
+  left_join(nmsu22_et_yld, by = c( "Row", "Range", "Rep", "Plot"))
+
+# lets just move yield columns forward 
+ nmsu22_et_combined <- nmsu22_et_combined %>%
+   dplyr::select(
+    1:6,                          # Keep the first 6 columns as-is
+    105:ncol(.),                   # Move columns 70 onward next
+    7:105                       # Then include the NDRE/NDVI columns
+   )
+colnames(nmsu22_et_combined)
+# lets remove serial number columns (X.x, X.y and Entry too)
+nmsu22_et_combined$X.x <- NULL
+nmsu22_et_combined$X.y <- NULL
+nmsu22_et_combined$Entry <- NULL
+colnames(nmsu22_et_combined)
+
+# check manually if files are correctly merged
+
+# thus combined file. now final file has Germplasm, Rep, Plot, Row, Rep, NDVI, GNDVI, NDRE, Yield
+
+write.csv(nmsu22_et_combined, file = "2022/MSI_data/Output_files/nmsu22_et_combined_phenotypes_MSI.csv")
+
+# manually checked combined file with individual file and it worked.
+
+# now lets save files for each NDVI, NDRE and GNDVI
+# separating out NDVI, NDRE and GNDVI columns as separate data file and save them.
+nmsu22_et_combined <- read.csv("2022/MSI_data/Output_files/nmsu22_et_combined_phenotypes_MSI.csv")
+
+
+```
+
+
+# IMP
+Chris confirmed that NUMEX germplasm's can be considered all same, so use same name for all.. also changed in 6th rmd with futher cleaning of data files... 
+```{r}
+nmsu22_et_combined <- read.csv("2022/MSI_data/Output_files/nmsu22_et_combined_phenotypes_MSI.csv")
+unique(nmsu22_et_combined$Germplasm) #24
+
+nmsu22_et_combined$Germplasm[grepl("^NUMEX_BILL_MELTON", nmsu22_et_combined$Germplasm)] <- "NUMEX_BILL_MELTON"
+unique(nmsu22_et_combined$Germplasm) # 22 cz three are merged into 1 ( so 3-1 =2 deduction)
+
+write.csv(nmsu22_et_combined, file = "2023/MSI_data/Output_files/nmsu22_et_combined_phenotypes_MSI.csv")
+
+
+# NDVI columns
+ndvi_22_et_combined <- nmsu22_et_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, yld4, yld5, starts_with("NDVI_"))
+write.csv(ndvi_22_et_combined, "2022/MSI_data/Output_files/nmsu_early_termination_22_NDVI_combined.csv", row.names = FALSE)
+
+# NDRE columns
+ndre_22_et_combined <- nmsu22_et_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, yld4, yld5, starts_with("NDRE_"))
+write.csv(ndvi_22_et_combined, "2022/MSI_data/Output_files/nmsu_early_termination_22_NDRE_combined.csv", row.names = FALSE)
+
+# GNDVI columns
+gndvi_22_et_combined <- nmsu22_et_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, yld4, yld5,  starts_with("GNDVI"))
+write.csv(ndvi_22_et_combined, "2022/MSI_data/Output_files/nmsu_early_termination_22_GNDVI_combined.csv", row.names = FALSE)
+
+ ## checked all three files have same columns numbers
+```
+
+
+
+
+
+```{r}
+model<-lmer(NDVI_144~1+(1|Germplasm),data=nmsu22_et_combined)
+VarCorr(model) 
+0.012021/(0.012021+0.016267) # 0.43
+
+model_2<-lmer(NDVI_270~1+(1|Germplasm),data=nmsu22_et_combined)
+VarCorr(model_2) 
+0.017610/(0.017610+0.023815) # 0.43
+
+```
+
+
+
+# understanding data more for making experimental designs
+
+```{r}
+unique(nmsu22_et_combined$Rep) # 1,2,3,4
+unique(nmsu22_et_combined$Row) # 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18
+unique(nmsu22_et_combined$Range) # 1 2 3 4 5 6 7 8
+unique(nmsu22_et_combined$Germplasm) # 24 unique
+unique(nmsu22_et_combined$Plot) # 144 unique plots from 300 to 443
+
+# lets check if et and normal has same germplasm
+unique(nmsu22_nor_combined$Germplasm)
+unique(nmsu22_et_combined$Germplasm)
+# the order might be diff. so use sort function to sort accordingly and check using identical function. sort arrange alphabetically
+identical(sort(unique(nmsu22_nor_combined$Germplasm)), sort(unique(nmsu22_et_combined$Germplasm)))
+  # came true so same germplasm used in both et and normal. 
+
+ # are all MSI dates same in two treatments
+colnames(ndvi_22_nor_combined) 
+colnames(ndvi_22_et_combined))
+  # same doy
+```
+
+
+
+# check outliers for yield data
+```{r}
+# Fit a linear model
+colnames(nmsu22_et_combined)
+# Outliers in Yield 1
+model <- lm(yld1 ~ Rep+Row+Range+Germplasm, data = nmsu22_et_combined, na.action = na.exclude) #model explains ~ 51% (R2= 51%) or 41% (adjusted)
+# now calculate residuals based on model
+summary(model)
+# Calculate residuals
+nmsu22_et_combined$residuals <- residuals(model, na.action = na.exclude)
+# Standardize the residuals
+nmsu22_et_combined$residuals_standard <- scale(nmsu22_et_combined$residuals, center = T, scale = T) 
+# Identify outliers
+outliers <- nmsu22_et_combined %>% filter(abs(residuals_standard) > 3)
+# Print outliers
+View(outliers)
+ # none
+
+hist(model$residuals) # looks bell shaped so can use standarized residuals which follow a normal distribution.
+hist(nmsu22_et_combined$residuals_standard) # looks bell shaped so follow a normal distribution.
+hist(nmsu22_et_combined$residuals) # looks bell shaped so follow a normal distribution.
+
+
+
+# for all yields
+library(dplyr)
+library(purrr)
+
+# Traits
+yield_traits_et <- paste0("yld", 1:5)
+
+# Function to fit model, calculate residuals, standardize, and extract outliers
+process_outliers_et <- function(trait, data) {
+  # Build formula dynamically
+  formula <- as.formula(paste(trait, "~ Rep + Row + Range + Germplasm"))
+  
+  # Fit model
+  model <- lm(formula, data = data, na.action = na.exclude)
+  
+  # Get residuals and standardized residuals
+  data[[paste0(trait, "_resid")]] <- residuals(model, na.action = na.exclude)
+  data[[paste0(trait, "_resid_std")]] <- scale(data[[paste0(trait, "_resid")]], center = TRUE, scale = TRUE)
+  
+  # Extract outliers
+  outliers <- data %>% filter(abs(.data[[paste0(trait, "_resid_std")]]) > 3)
+  
+  return(outliers)
+}
+
+# Apply the function to all yield traits
+outlier_list_et <- map(yield_traits_et, ~process_outliers(.x, nmsu22_et_combined))
+
+# Name the list elements for clarity
+names(outlier_list_et) <- yield_traits_et
+
+# View outliers for each trait
+
+# plot and standard residual value
+
+View(outlier_list_et$yld1) # none
+View(outlier_list_et$yld2) # none
+View(outlier_list_et$yld3) # none
+View(outlier_list_et$yld4) # none
+View(outlier_list_et$yld5) # NM1703PAR germplasm, plot 316 with -3.18 (no need to remove)
+
+```
+
+
+MSI Range of values to check outliers
+```{r MSI Range of values to check outliers}
+colnames(nmsu22_et_combined)
+library(dplyr)
+
+# Get column names of interest
+index_cols <- grep("^(GNDVI|NDVI|NDRE)_", colnames(nmsu22_et_combined), value = TRUE)
+
+# Calculate min and max for each
+index_summary <- sapply(index_cols, function(col) {
+  vals <- nmsu22_et_combined[[col]]
+  c(min = min(vals, na.rm = TRUE), max = max(vals, na.rm = TRUE))
+})
+
+# Convert to data frame
+index_summary_df <- as.data.frame(t(index_summary))
+index_summary_df$Index <- sub("_.*", "", rownames(index_summary_df))
+index_summary_df$Column <- rownames(index_summary_df)
+index_summary_df <- index_summary_df %>%
+  select(Index, Column, Min = min, Max = max)
+
+# View the result
+View(index_summary_df)
+
+#mean 
+
+index_summary_df %>%
+  group_by(Index) %>%
+  summarise(
+    Mean_Min = mean(Min, na.rm = TRUE),
+    Mean_Max = mean(Max, na.rm = TRUE)
+  )
+
+1 GNDVI   0.0234    0.213
+2 NDRE    0.302     0.477
+3 NDVI    0.361     0.534
+```
+
+
+
+
+

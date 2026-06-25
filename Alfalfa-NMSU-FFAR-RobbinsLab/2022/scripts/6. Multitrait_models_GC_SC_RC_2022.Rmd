@@ -1,0 +1,2819 @@
+---
+title: "Running multivariate models"
+author: "Dinesh Ghimire"
+date: "2025-08-22"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,etc..) particularly helpful. I'd be familiar with those before using this script
+# List of required packages
+required_packages <- c("dplyr","asreml", "readxl", "tidyr", "ggplot2", "reshape2","data.table", "viridis","grid", "gridExtra", "GGally")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NMSU"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NMSU 
+#below is what I get when I call getwd. Just check to make sure that the root for this script is the base of the github project, sometimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa_NMSU"
+setwd("~/FFAR-Alfalfa-NMSU")
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If something is misssing please let me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NMSU cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+USE FILTERED FILES HERE... 
+
+
+
+1. *First treatment NMSU_Normal 2022 *
+with spatial in the model, random = ~ vm(Material_Id, ct_geno_inverse) + ar1(Row):ar1(Range),
+
+
+
+*Normal irrigation treatment*
+Loading and preparing data files
+```{r loading files 08262025}
+#import merged phenotype file 
+nmsu22_nor_pheno <- read.csv("2022/MSI_data/Output_files/nmsu22_nor_combined_filtered_phenotypes_MSI.csv", sep = ",") %>% 
+  select(-X) # remove index column
+colnames(nmsu22_nor_pheno)
+# Before running models, make sure the variables are in correct form. Need to convert into factors and numeric if needed.
+  # converting all factorial variables into factor
+nmsu22_nor_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(nmsu22_nor_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+
+#import genotype file
+grm_aa <- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1)
+grm_aa <- as.matrix(grm_aa)
+mean(diag(grm_aa)) # 1
+hist(diag(grm_aa))
+
+grm_agh <- grm_aa+diag(.0005,length(grm_aa[,1]),length(grm_aa[,1])) # adding 0.05 nugget/ridge to ensure matrix is strictly positive definite
+grm_inverse <- solve(grm_agh)
+
+```
+
+
+Normally if the range of numbers vary a lot between vi's and yield, then we can scale yield to variance level of vi's. but here since yield is in lb and upto 2 digit, should have that issue. If got any, we can always use scaled yield.
+```{r scaling yield }
+# we only have to scale 6 harvest values based on GNDVI's value. Of course the variance between VI's differ but it should be okay to use Yield scaled onto GNDVI for analysis with NDRE and GGNDVI as well. 
+
+# Define the mapping of yield traits to GNDVI columns
+yield_traits <- paste0("yld", 1:6)
+GNDVI_times <- c("GNDVI_114", "GNDVI_144", "GNDVI_180", "GNDVI_206", "GNDVI_236", "GNDVI_270") # selecting one of the time point in each harvest window. selecting based on higher variation time point from heatmap, not actually calculating all. 
+
+# Loop over each yield trait
+for (i in 1:length(yield_traits)) {
+  
+  trait <- yield_traits[i]
+  GNDVI_col <- GNDVI_times[i]
+  
+  # Calculate variance of GNDVI and yield
+  GNDVI_var <- var(nmsu22_nor_pheno[[GNDVI_col]], na.rm = TRUE)
+  yld_var <- var(nmsu22_nor_pheno[[trait]], na.rm = TRUE)
+  
+  # Calculate scaling factor
+  sf <- sqrt(GNDVI_var) / sqrt(yld_var)
+  
+  # Create new scaled yield column
+  new_col <- paste0("sca_", trait)
+  nmsu22_nor_pheno[[new_col]] <- nmsu22_nor_pheno[[trait]] * sf
+  
+  #  Print scaling factor
+  cat("Scaling factor for", trait, "using", GNDVI_col, ":", sf, "\n")
+}
+
+
+# thus all scaled yields are added as a new column at last. 
+```
+
+one but not confirming now
+```{r for checking outliers}
+# Fit a linear model
+model <- lm(yld1 ~ Rep, data = nmsu22_nor_pheno, na.action = na.exclude)
+
+# Calculate residuals
+nmsu22_nor_pheno$residuals <- residuals(model, na.action = na.exclude)
+# Standardize the residuals
+nmsu22_nor_pheno$residuals_standard <- scale(nmsu22_nor_pheno$residuals, center = T, scale = T) 
+# Identify outliers
+outliers <- nmsu22_nor_pheno %>% filter(abs(residuals_standard) > 3)
+# Print outliers
+View(outliers)
+# one, not removing for now.
+
+```
+
+
+## 1.1. For NDVI 
+- For Harvest window 1:  62, 76, 90, 104, 114 and yld1
+- For Harvest window 2: "124", "130", "138", "144", "150" and yld2
+- For Harvest window 3: "166", "174", "yld3"
+- For Harvest window 4: "194", "200", "206", "yld4"
+- For Harvest window 5: "222", "236", "240", "yld5"
+- For Harvest window 6: "256", "264", "270",  "284", "292", "yld6"
+= 29
+
+### 1.1.1. Run models first
+- Univariate without spatial
+- Univariate with spatial
+- Bivariate without spatial
+- Bivariate with spatial
+
+#### 1.1.1.1. Univariate for yield without spatial
+h2 and SE
+0.13	0.09
+0.18	0.1
+0.21	0.1
+0.24	0.1
+0.2	0.1
+0.3	0.11
+```{r No spatial }
+## For yld1
+st_nmsu22_nor_yld1 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld1 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld1)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld1, heritA ~ V1 / (V1 + V2)) 
+
+## For yld2
+st_nmsu22_nor_yld2 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld2)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld2, heritA ~ V1 / (V1 + V2)) 
+
+## For yld3
+st_nmsu22_nor_yld3 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld3)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld3, heritA ~ V1 / (V1 + V2)) 
+
+## For yld4
+st_nmsu22_nor_yld4 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld4 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld4)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld4, heritA ~ V1 / (V1 + V2)) 
+
+## For yld5
+st_nmsu22_nor_yld5 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld5 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld5)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld5, heritA ~ V1 / (V1 + V2)) 
+
+## For yld6
+st_nmsu22_nor_yld6 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld6 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld6)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld6, heritA ~ V1 / (V1 + V2)) 
+
+```
+
+
+#### 1.1.1.2. Univariate for yield with spatial
+
+Yield	h2 (narrow)	SE
+1	0.58	0.12
+2	0.63	0.11
+3	0.63	0.1
+4	0.65	0.09
+5	0.68	0.09
+6	0.62	0.099
+```{r From spatial BLUPS and Univariate models}
+asreml.options(extra =200, maxit =200)
+## For yld1 (however might have to scale cz the blups value are higher here)
+st_nmsu22_nor_yld1 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld1 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld1)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld1, heritA ~ V1 / (V1 + V5)) 
+
+## For yld2
+st_nmsu22_nor_yld2 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld2)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld2, heritA ~ V1 / (V1 + V5)) 
+
+## For yld3
+st_nmsu22_nor_yld3 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld3)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld3, heritA ~ V1 / (V1 + V5)) 
+
+## For yld4
+st_nmsu22_nor_yld4 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld4 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld4)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld4, heritA ~ V1 / (V1 + V5)) 
+
+## For yld5
+st_nmsu22_nor_yld5 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld5 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld5)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld5, heritA ~ V1 / (V1 + V5)) 
+
+## For yld6
+st_nmsu22_nor_yld6 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld6 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_nor_pheno)}
+summary(st_nmsu22_nor_yld6)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_nor_yld6, heritA ~ V1 / (V1 + V5)) 
+
+
+```
+
+
+#### 1.1.1.3. Bivariate for yield without spatial
+
+for 1st window, none worked... genetic not converged.. 
+
+```{r Bivariate models without Spatial based on NDVI}
+colnames(nmsu22_nor_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "104", "114", "yld1"
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+ ## for NDVI_62:
+mt_nmsu22_nor_ndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+mt_nmsu22_nor_ndvi_62_gc <- asreml::vpredict(mt_nmsu22_nor_ndvi_62, gen.cor ~ (V2)/sqrt(V1*V3))
+mt_nmsu22_nor_ndvi_62_gc # -0.99
+mt_nmsu22_nor_ndvi_62_rc <- asreml::vpredict(mt_nmsu22_nor_ndvi_62, res.cor ~ (V6)/sqrt(V5*V7))
+mt_nmsu22_nor_ndvi_62_rc # -0.19
+
+ ## For NDVI_76
+mt_nmsu22_nor_ndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.9950337
+asreml::vpredict(mt_nmsu22_nor_ndvi_76, res.cor ~ (V6)/sqrt(V5*V7)) # - 0.29
+
+
+ ## For NDVI_90
+mt_nmsu22_nor_ndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.99
+asreml::vpredict(mt_nmsu22_nor_ndvi_90, res.cor ~ (V6)/sqrt(V5*V7)) # -0.02
+
+## For NDVI_104
+mt_nmsu22_nor_ndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.76
+asreml::vpredict(mt_nmsu22_nor_ndvi_104, res.cor ~ (V6)/sqrt(V5*V7)) # 0.75
+
+## For NDVI_114
+mt_nmsu22_nor_ndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.999
+asreml::vpredict(mt_nmsu22_nor_ndvi_114, res.cor ~ (V6)/sqrt(V5*V7)) # 0.93
+
+
+
+# 2. For harvest window 2: "124", "130", "138", "144", "150", "yld2", 
+## For NDVI_124
+mt_nmsu22_nor_ndvi_124 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_124) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_124)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_124, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.93
+asreml::vpredict(mt_nmsu22_nor_ndvi_124, res.cor ~ (V6)/sqrt(V5*V7)) # -0.50
+
+## For NDVI_130
+mt_nmsu22_nor_ndvi_130 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_130) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_130)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_130, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.97
+asreml::vpredict(mt_nmsu22_nor_ndvi_130, res.cor ~ (V6)/sqrt(V5*V7)) # 0.74
+
+## For NDVI_138
+mt_nmsu22_nor_ndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.30
+asreml::vpredict(mt_nmsu22_nor_ndvi_138, res.cor ~ (V6)/sqrt(V5*V7)) # 0.81
+
+## For NDVI_144
+mt_nmsu22_nor_ndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.98
+asreml::vpredict(mt_nmsu22_nor_ndvi_144, res.cor ~ (V6)/sqrt(V5*V7)) # 0.89
+
+## For NDVI_150
+mt_nmsu22_nor_ndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.97
+asreml::vpredict(mt_nmsu22_nor_ndvi_150, res.cor ~ (V6)/sqrt(V5*V7)) # 0.91
+
+
+
+
+# 3. For harvest window 3:  "166", "174", "yld3" 
+## For NDVI_166
+mt_nmsu22_nor_ndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.85
+asreml::vpredict(mt_nmsu22_nor_ndvi_166, res.cor ~ (V6)/sqrt(V5*V7)) # 0.07
+
+## For NDVI_174
+mt_nmsu22_nor_ndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.90
+asreml::vpredict(mt_nmsu22_nor_ndvi_174, res.cor ~ (V6)/sqrt(V5*V7)) # 0.74
+
+  
+# 4. For harvest window 4: "194", "200", "206", "yld4",
+## For NDVI_188: OUT
+
+## For NDVI_194
+mt_nmsu22_nor_ndvi_194 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, NDVI_194) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_194)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_194, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.99
+asreml::vpredict(mt_nmsu22_nor_ndvi_194, res.cor ~ (V6)/sqrt(V5*V7)) # 0.64
+
+## For NDVI_200
+mt_nmsu22_nor_ndvi_200 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, NDVI_200) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_200)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_200, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.97
+asreml::vpredict(mt_nmsu22_nor_ndvi_200, res.cor ~ (V6)/sqrt(V5*V7)) # 0.65
+
+## For NDVI_206
+mt_nmsu22_nor_ndvi_206 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, NDVI_206) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_206)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_206, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.96
+asreml::vpredict(mt_nmsu22_nor_ndvi_206, res.cor ~ (V6)/sqrt(V5*V7)) # 0.86
+
+
+# 5. For harvest window 5: "222",  "236", "240"
+
+## For NDVI_222
+mt_nmsu22_nor_ndvi_222 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_222) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_222)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_222, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.25
+asreml::vpredict(mt_nmsu22_nor_ndvi_222, res.cor ~ (V6)/sqrt(V5*V7)) # 0.32
+
+## For NDVI_236: didn't work
+mt_nmsu22_nor_ndvi_236 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_236) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_236)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_236, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_236, res.cor ~ (V6)/sqrt(V5*V7)) # 
+
+## For NDVI_240
+mt_nmsu22_nor_ndvi_240 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_240) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_240)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_240, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.36
+asreml::vpredict(mt_nmsu22_nor_ndvi_240, res.cor ~ (V6)/sqrt(V5*V7)) # 0.63
+
+# 5. For harvest window 6: "256", "264", "270", "284", "292"
+
+## For NDVI_256: didnt work
+mt_nmsu22_nor_ndvi_256 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_256) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_256)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_256, gen.cor ~ (V2)/sqrt(V1*V3)) #
+asreml::vpredict(mt_nmsu22_nor_ndvi_256, res.cor ~ (V6)/sqrt(V5*V7)) # 
+
+## For NDVI_264
+mt_nmsu22_nor_ndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.94
+asreml::vpredict(mt_nmsu22_nor_ndvi_264, res.cor ~ (V6)/sqrt(V5*V7)) # 0.70
+
+## For NDVI_270
+mt_nmsu22_nor_ndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.97
+asreml::vpredict(mt_nmsu22_nor_ndvi_270, res.cor ~ (V6)/sqrt(V5*V7)) # 0.77
+
+## For NDVI_284
+mt_nmsu22_nor_ndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.93
+asreml::vpredict(mt_nmsu22_nor_ndvi_284, res.cor ~ (V6)/sqrt(V5*V7)) # 0.35
+
+## For NDVI_292
+mt_nmsu22_nor_ndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.97
+asreml::vpredict(mt_nmsu22_nor_ndvi_292, res.cor ~ (V6)/sqrt(V5*V7)) # 0.50
+
+```
+
+
+
+#### 1.1.1.4. Bivariate for yield with spatial
+
+run for with spatial and see if the correlations are still -vely high like above... if so might have to switch to random regression cz mt models not doing great for this smaller dataset (fewer observations)
+
+```{r}
+colnames(nmsu22_nor_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "104", "114", "yld1"
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+ ## for NDVI_62: bound
+mt_nmsu22_nor_ndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) +diag(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+asreml::vpredict(mt_nmsu22_nor_ndvi_62, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_62, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_62, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+ ## For NDVI_76 - didn't converge with full or diag residual or diag spatial...
+mt_nmsu22_nor_ndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + diag(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_76, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_76, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+ ## For NDVI_90: same didn't... 
+mt_nmsu22_nor_ndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_90, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_90, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+## For NDVI_104 - din't
+mt_nmsu22_nor_ndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_104, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_104, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+## For NDVI_114 - didn't
+mt_nmsu22_nor_ndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_114, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_114, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+dsfd
+
+# 2. For harvest window 2: "124", "130", "138", "144", "150", "yld2", 
+## For NDVI_124
+mt_nmsu22_nor_ndvi_124 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_124) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_124)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_124, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.29
+asreml::vpredict(mt_nmsu22_nor_ndvi_124, spa.cor ~ (V5)/sqrt(V4*V6)) # -0.38
+asreml::vpredict(mt_nmsu22_nor_ndvi_124, res.cor ~ (V11)/sqrt(V10*V12)) # 0.24
+## For NDVI_130
+mt_nmsu22_nor_ndvi_130 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_130) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_130)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_130, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.41
+asreml::vpredict(mt_nmsu22_nor_ndvi_130, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.50
+asreml::vpredict(mt_nmsu22_nor_ndvi_130, res.cor ~ (V11)/sqrt(V10*V12)) # 0.76
+
+## For NDVI_138
+mt_nmsu22_nor_ndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.88
+asreml::vpredict(mt_nmsu22_nor_ndvi_138, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.24
+asreml::vpredict(mt_nmsu22_nor_ndvi_138, res.cor ~ (V11)/sqrt(V10*V12)) # 0.63
+
+## For NDVI_144
+mt_nmsu22_nor_ndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.88
+asreml::vpredict(mt_nmsu22_nor_ndvi_144, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.64
+asreml::vpredict(mt_nmsu22_nor_ndvi_144, res.cor ~ (V11)/sqrt(V10*V12)) # 0.86
+
+## For NDVI_150
+mt_nmsu22_nor_ndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.65
+asreml::vpredict(mt_nmsu22_nor_ndvi_150, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.91
+asreml::vpredict(mt_nmsu22_nor_ndvi_150, res.cor ~ (V11)/sqrt(V10*V12)) # 0.86
+
+
+
+
+# 3. For harvest window 3:  "166", "174", "yld3" 
+## For NDVI_166
+mt_nmsu22_nor_ndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.85
+asreml::vpredict(mt_nmsu22_nor_ndvi_166, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.15
+asreml::vpredict(mt_nmsu22_nor_ndvi_166, res.cor ~ (V11)/sqrt(V10*V12)) # 0.21
+
+
+## For NDVI_174
+mt_nmsu22_nor_ndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.90
+asreml::vpredict(mt_nmsu22_nor_ndvi_174, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.38
+asreml::vpredict(mt_nmsu22_nor_ndvi_174, res.cor ~ (V11)/sqrt(V10*V12)) # 0.65
+
+  
+# 4. For harvest window 4: "194", "200", "206", "yld4",
+
+## For NDVI_194 - didn't work with full but with diag for residual it worked. 
+mt_nmsu22_nor_ndvi_194 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, NDVI_194) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_194)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_194, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.90
+asreml::vpredict(mt_nmsu22_nor_ndvi_194, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.49
+asreml::vpredict(mt_nmsu22_nor_ndvi_194, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+## For NDVI_200
+mt_nmsu22_nor_ndvi_200 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, NDVI_200) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_200)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_200, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.90
+asreml::vpredict(mt_nmsu22_nor_ndvi_200, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.47
+asreml::vpredict(mt_nmsu22_nor_ndvi_200, res.cor ~ (V11)/sqrt(V10*V12)) # 0.55
+
+## For NDVI_206
+mt_nmsu22_nor_ndvi_206 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, NDVI_206) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_206)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_206, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.97
+asreml::vpredict(mt_nmsu22_nor_ndvi_206, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.50
+asreml::vpredict(mt_nmsu22_nor_ndvi_206, res.cor ~ (V11)/sqrt(V10*V12)) # 0.73
+
+
+# 5. For harvest window 5: "222",  "236", "240"
+
+## For NDVI_222
+mt_nmsu22_nor_ndvi_222 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_222) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_222)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_222, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.73
+asreml::vpredict(mt_nmsu22_nor_ndvi_222, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.36
+asreml::vpredict(mt_nmsu22_nor_ndvi_222, res.cor ~ (V11)/sqrt(V10*V12)) # 0.15
+
+## For NDVI_236: 
+mt_nmsu22_nor_ndvi_236 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_236) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_236)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_236, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.93
+asreml::vpredict(mt_nmsu22_nor_ndvi_236, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.38
+asreml::vpredict(mt_nmsu22_nor_ndvi_236, res.cor ~ (V11)/sqrt(V10*V12)) # 0.47
+
+## For NDVI_240
+mt_nmsu22_nor_ndvi_240 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_240) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_240)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_240, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.76
+asreml::vpredict(mt_nmsu22_nor_ndvi_240, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.48
+asreml::vpredict(mt_nmsu22_nor_ndvi_240, res.cor ~ (V11)/sqrt(V10*V12)) # 0.33
+
+# 5. For harvest window 6: "256", "264", "270", "284", "292"
+
+## For NDVI_256: didn't work with diag for res or diag for spatial too.
+mt_nmsu22_nor_ndvi_256 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_256) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_256)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_256, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_256, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_256, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+## For NDVI_264
+mt_nmsu22_nor_ndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.90
+asreml::vpredict(mt_nmsu22_nor_ndvi_264, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.11
+asreml::vpredict(mt_nmsu22_nor_ndvi_264, res.cor ~ (V11)/sqrt(V10*V12)) # 0.42
+
+## For NDVI_270
+mt_nmsu22_nor_ndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.95
+asreml::vpredict(mt_nmsu22_nor_ndvi_270, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.70
+asreml::vpredict(mt_nmsu22_nor_ndvi_270, res.cor ~ (V11)/sqrt(V10*V12)) # 0.58
+
+## For NDVI_284: didn't work
+mt_nmsu22_nor_ndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_284, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_284, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+## For NDVI_292: didn't work 
+mt_nmsu22_nor_ndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, NDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_ndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_ndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_292, spa.cor ~ (V5)/sqrt(V4*V6)) # 
+asreml::vpredict(mt_nmsu22_nor_ndvi_292, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+```
+
+
+
+
+
+
+
+
+
+## 1.2. For GNDVI 
+- For Harvest window 1:  62, 76, 90, 96, 104,110, 114 and yld1
+- For Harvest window 2:  "124", "130", "138", "144", "150" and yld2
+- For Harvest window 3: "166", "174","180", "yld3"
+- For Harvest window 4: "188", 194", "200", "206", "yld4"
+- For Harvest window 5: "216", "222", "228", 236", "240", "yld5"
+- For Harvest window 6: "264", "270", "278", "284", "292", "yld6"
+= 35
+
+### 1.2.1. Run models first
+- Univariate without spatial
+- Univariate with spatial
+- Bivariate without spatial
+- Bivariate with spatial
+
+#### 1.2.1.1. Univariate for yield without spatial
+SAME AS NDVI FOR YIELD (univariate)
+
+#### 1.2.1.2. Univariate for yield with spatial
+SAME AS NDVI FOR YIELD (univariate)
+
+
+#### 1.2.1.3. Bivariate for yield without spatial
+
+
+
+```{r Bivariate models without Spatial based on GNDVI}
+colnames(nmsu22_nor_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "96", "104", "110", "114", "yld1"
+
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+ ## for GNDVI_62:
+mt_nmsu22_nor_gndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+asreml::vpredict(mt_nmsu22_nor_gndvi_62, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.94
+asreml::vpredict(mt_nmsu22_nor_gndvi_62, res.cor ~ (V6)/sqrt(V5*V7)) # 0.59
+
+ ## For GNDVI_76
+mt_nmsu22_nor_gndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.95
+asreml::vpredict(mt_nmsu22_nor_gndvi_76, res.cor ~ (V6)/sqrt(V5*V7)) # 0.84
+
+
+ ## For GNDVI_90
+mt_nmsu22_nor_gndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.92
+asreml::vpredict(mt_nmsu22_nor_gndvi_90, res.cor ~ (V6)/sqrt(V5*V7)) # 0.75
+
+## For GNDVI_96
+mt_nmsu22_nor_gndvi_96 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_96) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_96)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_96, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.99
+asreml::vpredict(mt_nmsu22_nor_gndvi_96, res.cor ~ (V6)/sqrt(V5*V7)) # 0.95
+
+## For GNDVI_104
+mt_nmsu22_nor_gndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.99
+asreml::vpredict(mt_nmsu22_nor_gndvi_104, res.cor ~ (V6)/sqrt(V5*V7)) # 0.83
+
+## For GNDVI_114
+mt_nmsu22_nor_gndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.99
+asreml::vpredict(mt_nmsu22_nor_gndvi_114, res.cor ~ (V6)/sqrt(V5*V7)) # 0.82
+
+
+
+# 2. For harvest window 2: "124", "130", "138", "144", "150", "yld2", 
+
+## For GNDVI_124
+mt_nmsu22_nor_gndvi_124 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_124) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_124)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_124, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.80
+asreml::vpredict(mt_nmsu22_nor_gndvi_124, res.cor ~ (V6)/sqrt(V5*V7)) # 0.36
+
+## For GNDVI_130
+mt_nmsu22_nor_gndvi_130 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_130) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_130)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_130, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.24
+asreml::vpredict(mt_nmsu22_nor_gndvi_130, res.cor ~ (V6)/sqrt(V5*V7)) # 0.48
+
+## For GNDVI_138
+mt_nmsu22_nor_gndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.26
+asreml::vpredict(mt_nmsu22_nor_gndvi_138, res.cor ~ (V6)/sqrt(V5*V7)) # 0.50
+
+## For GNDVI_144
+mt_nmsu22_nor_gndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.93
+asreml::vpredict(mt_nmsu22_nor_gndvi_144, res.cor ~ (V6)/sqrt(V5*V7)) # 0.89
+
+## For GNDVI_150
+mt_nmsu22_nor_gndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.96
+asreml::vpredict(mt_nmsu22_nor_gndvi_150, res.cor ~ (V6)/sqrt(V5*V7)) # 0.89
+
+
+
+
+# 3. For harvest window 3:  "166", "174", "180", "yld3" 
+## For GNDVI_166
+mt_nmsu22_nor_gndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.03
+asreml::vpredict(mt_nmsu22_nor_gndvi_166, res.cor ~ (V6)/sqrt(V5*V7)) # 0.51
+
+## For GNDVI_174
+mt_nmsu22_nor_gndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.27
+asreml::vpredict(mt_nmsu22_nor_gndvi_174, res.cor ~ (V6)/sqrt(V5*V7)) # 0.29
+
+## For GNDVI_180
+mt_nmsu22_nor_gndvi_180 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_180) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_180)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_180, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.68
+asreml::vpredict(mt_nmsu22_nor_gndvi_180, res.cor ~ (V6)/sqrt(V5*V7)) # 0.82
+  
+
+
+# 4. For harvest window 4: "188", "194", "200", "206", "yld4",
+## For GNDVI_188: 
+mt_nmsu22_nor_gndvi_188 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, GNDVI_188) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_188)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_188, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.93
+asreml::vpredict(mt_nmsu22_nor_gndvi_188, res.cor ~ (V6)/sqrt(V5*V7)) # -0.76
+
+## For GNDVI_194
+mt_nmsu22_nor_gndvi_194 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, GNDVI_194) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_194)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_194, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.74
+asreml::vpredict(mt_nmsu22_nor_gndvi_194, res.cor ~ (V6)/sqrt(V5*V7)) # 0.78
+
+## For GNDVI_200
+mt_nmsu22_nor_gndvi_200 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, GNDVI_200) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_200)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_200, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.34
+asreml::vpredict(mt_nmsu22_nor_gndvi_200, res.cor ~ (V6)/sqrt(V5*V7)) # -0.19
+
+## For GNDVI_206
+mt_nmsu22_nor_gndvi_206 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, GNDVI_206) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_206)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_206, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.28
+asreml::vpredict(mt_nmsu22_nor_gndvi_206, res.cor ~ (V6)/sqrt(V5*V7)) # 0.79
+
+
+# 5. For harvest window 5: "216", "222", "228", "236", "240",
+
+## For GNDVI_216
+mt_nmsu22_nor_gndvi_216 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_216) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_216)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_216, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.76
+asreml::vpredict(mt_nmsu22_nor_gndvi_216, res.cor ~ (V6)/sqrt(V5*V7)) # -0.24
+
+## For GNDVI_222
+mt_nmsu22_nor_gndvi_222 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_222) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_222)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_222, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.85
+asreml::vpredict(mt_nmsu22_nor_gndvi_222, res.cor ~ (V6)/sqrt(V5*V7)) # -0.39
+
+## For GNDVI_228
+mt_nmsu22_nor_gndvi_228 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_228) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_228)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_228, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.08
+asreml::vpredict(mt_nmsu22_nor_gndvi_228, res.cor ~ (V6)/sqrt(V5*V7)) # 0.03
+
+## For GNDVI_236: BOUND
+mt_nmsu22_nor_gndvi_236 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_236) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_236)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_236, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_236, res.cor ~ (V6)/sqrt(V5*V7)) # 
+
+## For GNDVI_240
+mt_nmsu22_nor_gndvi_240 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_240) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_240)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_240, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.98
+asreml::vpredict(mt_nmsu22_nor_gndvi_240, res.cor ~ (V6)/sqrt(V5*V7)) # 0.55
+
+# 6. For harvest window 6: "264", "270", "278", "284", "292"
+
+## For GNDVI_264
+mt_nmsu22_nor_gndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.07
+asreml::vpredict(mt_nmsu22_nor_gndvi_264, res.cor ~ (V6)/sqrt(V5*V7)) # 0.43
+
+## For GNDVI_270
+mt_nmsu22_nor_gndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.38
+asreml::vpredict(mt_nmsu22_nor_gndvi_270, res.cor ~ (V6)/sqrt(V5*V7)) # 0.09
+
+## For GNDVI_278
+mt_nmsu22_nor_gndvi_278 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_278) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_278)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_278, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.83
+asreml::vpredict(mt_nmsu22_nor_gndvi_278, res.cor ~ (V6)/sqrt(V5*V7)) # -0.035
+
+
+## For GNDVI_284
+mt_nmsu22_nor_gndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.29
+asreml::vpredict(mt_nmsu22_nor_gndvi_284, res.cor ~ (V6)/sqrt(V5*V7)) # 0.58
+
+## For GNDVI_292
+mt_nmsu22_nor_gndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.56
+asreml::vpredict(mt_nmsu22_nor_gndvi_292, res.cor ~ (V6)/sqrt(V5*V7)) # 0.29
+
+```
+
+
+
+#### 1.2.1.4. Bivariate for yield with spatial
+
+```{r}
+colnames(nmsu22_nor_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "96", "104", "110", "114", "yld1"
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+ ## for GNDVI_62:
+mt_nmsu22_nor_gndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) +us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+asreml::vpredict(mt_nmsu22_nor_gndvi_62, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.92
+asreml::vpredict(mt_nmsu22_nor_gndvi_62, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.72
+asreml::vpredict(mt_nmsu22_nor_gndvi_62, res.cor ~ (V11)/sqrt(V10*V12)) # 0.92
+
+ ## For GNDVI_76 - 
+mt_nmsu22_nor_gndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.94 (with diag for residual)
+asreml::vpredict(mt_nmsu22_nor_gndvi_76, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.89 (with diag for residual)
+asreml::vpredict(mt_nmsu22_nor_gndvi_76, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+ ## For GNDVI_90: 
+mt_nmsu22_nor_gndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.91
+asreml::vpredict(mt_nmsu22_nor_gndvi_90, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.90
+asreml::vpredict(mt_nmsu22_nor_gndvi_90, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+## For GNDVI_96:  
+mt_nmsu22_nor_gndvi_96 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_96) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_96)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_96, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.91
+asreml::vpredict(mt_nmsu22_nor_gndvi_96, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.94
+asreml::vpredict(mt_nmsu22_nor_gndvi_96, res.cor ~ (V11)/sqrt(V10*V12)) # 0.78
+
+## For GNDVI_104
+mt_nmsu22_nor_gndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.88
+asreml::vpredict(mt_nmsu22_nor_gndvi_104, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.87
+asreml::vpredict(mt_nmsu22_nor_gndvi_104, res.cor ~ (V11)/sqrt(V10*V12)) # 0.82
+
+## For GNDVI_114 -t
+mt_nmsu22_nor_gndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.89
+asreml::vpredict(mt_nmsu22_nor_gndvi_114, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.86
+asreml::vpredict(mt_nmsu22_nor_gndvi_114, res.cor ~ (V11)/sqrt(V10*V12)) # 0.57
+
+
+
+# 2. For harvest window 2: "124", "130", "138", "144", "150", "yld2", 
+## For GNDVI_124
+mt_nmsu22_nor_gndvi_124 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_124) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_124)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_124, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.33
+asreml::vpredict(mt_nmsu22_nor_gndvi_124, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.16
+asreml::vpredict(mt_nmsu22_nor_gndvi_124, res.cor ~ (V11)/sqrt(V10*V12)) # -0.005
+## For GNDVI_130
+mt_nmsu22_nor_gndvi_130 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_130) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_130)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_130, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.82
+asreml::vpredict(mt_nmsu22_nor_gndvi_130, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.52
+asreml::vpredict(mt_nmsu22_nor_gndvi_130, res.cor ~ (V11)/sqrt(V10*V12)) # 0.82
+
+## For GNDVI_138: didn't with all us, then didn't with diag for residual, didn't with diag for gen, worked with diag for spatial.
+mt_nmsu22_nor_gndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + diag(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.85 (diag for spatial)
+# spatial = diag
+asreml::vpredict(mt_nmsu22_nor_gndvi_138, res.cor ~ (V10)/sqrt(V9*V11)) # 0.88
+
+## For GNDVI_144
+mt_nmsu22_nor_gndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.89
+asreml::vpredict(mt_nmsu22_nor_gndvi_144, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.80
+asreml::vpredict(mt_nmsu22_nor_gndvi_144, res.cor ~ (V11)/sqrt(V10*V12)) # 0.76
+
+## For GNDVI_150: for full, var st not positive definite
+mt_nmsu22_nor_gndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.95
+asreml::vpredict(mt_nmsu22_nor_gndvi_150, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.97
+asreml::vpredict(mt_nmsu22_nor_gndvi_150, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+
+
+
+# 3. For harvest window 3:  "166", "174", "180", "yld3" 
+## For GNDVI_166
+mt_nmsu22_nor_gndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.82
+asreml::vpredict(mt_nmsu22_nor_gndvi_166, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.20
+asreml::vpredict(mt_nmsu22_nor_gndvi_166, res.cor ~ (V11)/sqrt(V10*V12)) # 0.84
+
+
+## For GNDVI_174
+mt_nmsu22_nor_gndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.95
+asreml::vpredict(mt_nmsu22_nor_gndvi_174, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.41
+asreml::vpredict(mt_nmsu22_nor_gndvi_174, res.cor ~ (V11)/sqrt(V10*V12)) # 0.72
+
+## For GNDVI_180:  
+mt_nmsu22_nor_gndvi_180 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_180) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_180)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_180, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.92
+asreml::vpredict(mt_nmsu22_nor_gndvi_180, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.81
+asreml::vpredict(mt_nmsu22_nor_gndvi_180, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+  
+
+
+
+
+# 4. For harvest window 4: "188", "194", "200", "206", "yld4",
+
+## For GNDVI_188:  diag for gen didn't work but the model says no gen cor between 
+mt_nmsu22_nor_gndvi_188 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_188) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_nor_pheno)}
+
+summary(mt_nmsu22_nor_gndvi_188)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_188, gen.cor ~ (V2)/sqrt(V1*V3)) # ~ 0
+asreml::vpredict(mt_nmsu22_nor_gndvi_188, spa.cor ~ (V5)/sqrt(V4*V6)) # -0.6
+asreml::vpredict(mt_nmsu22_nor_gndvi_188, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+## For GNDVI_194 - 
+mt_nmsu22_nor_gndvi_194 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, GNDVI_194) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_194)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_194, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.92
+asreml::vpredict(mt_nmsu22_nor_gndvi_194, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.28
+asreml::vpredict(mt_nmsu22_nor_gndvi_194, res.cor ~ (V11)/sqrt(V10*V12)) # 0.82
+
+## For GNDVI_200 # didn't work
+mt_nmsu22_nor_gndvi_200 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, GNDVI_200) ~ 1 + Rep, #rep effect as fixed
+         random = ~ diag(trait):vm(Germplasm,  grm_inverse) + diag(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_200)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_200, gen.cor ~ (V2)/sqrt(V1*V3)) # NA
+asreml::vpredict(mt_nmsu22_nor_gndvi_200, spa.cor ~ (V5)/sqrt(V4*V6)) # NA
+asreml::vpredict(mt_nmsu22_nor_gndvi_200, res.cor ~ (V11)/sqrt(V10*V12)) # NA
+
+## For GNDVI_206
+mt_nmsu22_nor_gndvi_206 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld4, GNDVI_206) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_206)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_206, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.96
+asreml::vpredict(mt_nmsu22_nor_gndvi_206, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.74
+asreml::vpredict(mt_nmsu22_nor_gndvi_206, res.cor ~ (V11)/sqrt(V10*V12)) # 0.62
+
+
+# 5. For harvest window 5: "216", "222", "228", "236", "240"
+## For GNDVI_216:  
+mt_nmsu22_nor_gndvi_216 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_216) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_216)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_216, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.46
+asreml::vpredict(mt_nmsu22_nor_gndvi_216, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.08
+asreml::vpredict(mt_nmsu22_nor_gndvi_216, res.cor ~ (V11)/sqrt(V10*V12)) # 0.06
+
+## For GNDVI_222
+mt_nmsu22_nor_gndvi_222 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_222) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_222)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_222, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.87
+asreml::vpredict(mt_nmsu22_nor_gndvi_222, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.18
+asreml::vpredict(mt_nmsu22_nor_gndvi_222, res.cor ~ (V11)/sqrt(V10*V12)) # 0.67
+
+## For GNDVI_228:  
+mt_nmsu22_nor_gndvi_228 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_228) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_228)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_228, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.77
+asreml::vpredict(mt_nmsu22_nor_gndvi_228, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.30
+asreml::vpredict(mt_nmsu22_nor_gndvi_228, res.cor ~ (V11)/sqrt(V10*V12)) # 0.74
+
+## For GNDVI_236: 
+mt_nmsu22_nor_gndvi_236 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_236) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_236)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_236, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.95
+asreml::vpredict(mt_nmsu22_nor_gndvi_236, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.57
+asreml::vpredict(mt_nmsu22_nor_gndvi_236, res.cor ~ (V11)/sqrt(V10*V12)) # 0.79
+
+## For GNDVI_240
+mt_nmsu22_nor_gndvi_240 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_240) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_240)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_240, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.90
+asreml::vpredict(mt_nmsu22_nor_gndvi_240, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.69
+asreml::vpredict(mt_nmsu22_nor_gndvi_240, res.cor ~ (V11)/sqrt(V10*V12)) # 0.70
+
+# 5. For harvest window 6: "264", "270", "278", "284", "292"
+
+## For GNDVI_264
+mt_nmsu22_nor_gndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.84
+asreml::vpredict(mt_nmsu22_nor_gndvi_264, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.40
+asreml::vpredict(mt_nmsu22_nor_gndvi_264, res.cor ~ (V11)/sqrt(V10*V12)) # 0.70
+
+## For GNDVI_270
+mt_nmsu22_nor_gndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.87
+asreml::vpredict(mt_nmsu22_nor_gndvi_270, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.25
+asreml::vpredict(mt_nmsu22_nor_gndvi_270, res.cor ~ (V11)/sqrt(V10*V12)) # 0.78
+
+## For GNDVI_278:  
+mt_nmsu22_nor_gndvi_278 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_278) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_278)$varcomp # 
+asreml::vpredict(mt_nmsu22_nor_gndvi_278, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.54
+asreml::vpredict(mt_nmsu22_nor_gndvi_278, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.17
+asreml::vpredict(mt_nmsu22_nor_gndvi_278, res.cor ~ (V11)/sqrt(V10*V12)) # 0.49
+
+## For GNDVI_284: 
+mt_nmsu22_nor_gndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.45
+asreml::vpredict(mt_nmsu22_nor_gndvi_284, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.54
+asreml::vpredict(mt_nmsu22_nor_gndvi_284, res.cor ~ (V11)/sqrt(V10*V12)) # 0.50
+
+## For GNDVI_292: 
+mt_nmsu22_nor_gndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld6, GNDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_nor_pheno)}
+summary(mt_nmsu22_nor_gndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_nor_gndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.13
+asreml::vpredict(mt_nmsu22_nor_gndvi_292, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.50
+asreml::vpredict(mt_nmsu22_nor_gndvi_292, res.cor ~ (V11)/sqrt(V10*V12)) # 0.31
+
+```
+
+
+
+
+
+
+
+
+
+
+
+################################# Early Termination ################################
+
+
+
+
+
+
+2. *First treatment NMSU_Early_Termination 2022 *
+with spatial in the model, random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+
+
+
+*Early_Termination irrigation treatment*
+Loading and preparing data files
+```{r loading files 06272025}
+#import merged phenotype file 
+nmsu22_et_pheno <- read.csv("2022/MSI_data/Output_files/nmsu22_et_combined_filtered_phenotypes_MSI.csv", sep = ",") %>% 
+  select(-X) # remove index column
+
+# Before running models, make sure the variables are in correct form. Need to convert into factors and numeric if needed.
+  # converting all factorial variables into factor
+nmsu22_et_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(nmsu22_et_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+  ## make sure all variables are in correct form (factors or numeric)
+
+#import genotype file
+grm_aa <- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1)
+grm_aa <- as.matrix(grm_aa)
+mean(diag(grm_aa)) # 1
+hist(diag(grm_aa))
+
+grm_agh <- grm_aa+diag(.0005,length(grm_aa[,1]),length(grm_aa[,1]))
+grm_inverse <- solve(grm_agh)
+
+#now run the model for now without GRM but need to find GRM.
+
+```
+
+
+Normally if the range of numbers vary a lot between vi's and yield, then we can scale yield to variance level of vi's. but here since yield is in lb and upto 2 digit, should have that issue. If got any, we can always use scaled yield.
+```{r scaling yield }
+# we only have to scale 5 harvest values based on NDVI's value. Of course the variance between VI's differ but it should be okay to use Yield scaled onto NDVI for analysis with NDRE and GNDVI as well. 
+
+# Define the mapping of yield traits to NDVI columns
+yield_traits <- paste0("yld", 1:5)
+ndvi_times <- c("NDVI_114", "NDVI_144", "NDVI_180", "NDVI_180", "NDVI_270") # selecting one of the time point in each harvest window. selecting based on higher variation time point from heatmap, not actually calculating all. # here since we filtered out NDVI 200 so using 180's scaling factor, it should be on same scale and similar.
+ # yield 4 has smaller values cz after et period
+
+# Loop over each yield trait
+for (i in 1:length(yield_traits)) {
+  
+  trait <- yield_traits[i]
+  ndvi_col <- ndvi_times[i]
+  
+  # Calculate variance of NDVI and yield
+  ndvi_var <- var(nmsu22_et_pheno[[ndvi_col]], na.rm = TRUE)
+  yld_var <- var(nmsu22_et_pheno[[trait]], na.rm = TRUE)
+  
+  # Calculate scaling factor
+  sf <- sqrt(ndvi_var) / sqrt(yld_var)
+  
+  # Create new scaled yield column
+  new_col <- paste0("sca_", trait)
+  nmsu22_et_pheno[[new_col]] <- nmsu22_et_pheno[[trait]] * sf
+  
+  #  Print scaling factor
+  cat("Scaling factor for", trait, "using", ndvi_col, ":", sf, "\n")
+}
+
+# thus all scaled yields are added as a new column at last. 
+```
+
+
+one on yield 5 but not removing as its close to 3. 
+```{r for checking outliers}
+# for all yields
+library(dplyr)
+library(purrr)
+
+
+# Traits
+yield_traits_et <- paste0("yld", 1:5)
+
+# Function to fit model, calculate residuals, standardize, and extract outliers
+process_outliers_et <- function(trait, data) {
+  # Build formula dynamically
+  formula <- as.formula(paste(trait, "~ Rep + Row + Range + Germplasm"))
+  
+  # Fit model
+  model <- lm(formula, data = data, na.action = na.exclude)
+  
+  # Get residuals and standardized residuals
+  data[[paste0(trait, "_resid")]] <- residuals(model, na.action = na.exclude)
+  data[[paste0(trait, "_resid_std")]] <- scale(data[[paste0(trait, "_resid")]], center = TRUE, scale = TRUE)
+  
+  # Extract outliers
+  outliers <- data %>% filter(abs(.data[[paste0(trait, "_resid_std")]]) > 3)
+  
+  return(outliers)
+}
+
+# Apply the function to all yield traits
+outlier_list_et <- map(yield_traits_et, ~process_outliers(.x, nmsu22_et_combined))
+
+# Name the list elements for clarity
+names(outlier_list_et) <- yield_traits_et
+
+# View outliers for each trait
+
+# plot and standard residual value
+
+View(outlier_list_et$yld1) # none
+View(outlier_list_et$yld2) # none
+View(outlier_list_et$yld3) # none
+View(outlier_list_et$yld4) # none
+View(outlier_list_et$yld5) # NM1703PAR germplasm, plot 316 with -3.18 (no need to remove)
+
+```
+
+## 2.1. For NDVI
+
+### 2.1.1. Run models first
+- Univariate without spatial
+- Univariate with spatial
+- Bivariate without spatial
+- Bivariate with spatial
+
+#### 2.1.1.1. Univariate for yield without spatial
+
+```{r No spatial Univariate ET 2022 }
+## For yld1
+st_nmsu22_et_yld1 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld1 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld1)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld1, heritA ~ V1 / (V1 + V2)) 
+# gen var:0.0004868955 , res. var: 0.0012569313, h2: 0.28 and SE: 0.10 
+
+## For yld2
+st_nmsu22_et_yld2 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld2)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld2, heritA ~ V1 / (V1 + V2)) 
+# gen var:0.08621192 , res. var: 0.53078723, h2: 0.14 and SE: 0.09 
+
+## For yld3
+st_nmsu22_et_yld3 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld3)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld3, heritA ~ V1 / (V1 + V2)) 
+# gen var:0.2386510 , res. var: 0.4470751, h2: 0.35 and SE: 0.11 
+
+## For yld4
+st_nmsu22_et_yld4 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld4 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld4)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld4, heritA ~ V1 / (V1 + V2)) 
+# gen var:0.01470560 , res. var: 0.04819897, h2: 0.23 and SE: 0.10 
+
+## For yld5
+st_nmsu22_et_yld5 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld5 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) ,
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld5)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld5, heritA ~ V1 / (V1 + V2)) 
+# gen var:0.2819365 , res. var: 0.2623923, h2: 0.52 and SE: 0.10 
+
+```
+
+
+#### 2.1.1.2. Univariate for yield with spatial
+
+```{r From spatial BLUPS and Univariate models ET 2022}
+asreml.options(extra =200, maxit =200)
+## For yld1 : full model bound with yield 1 and sca_yld1 too
+st_nmsu22_et_yld1 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld1 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld1)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld1, heritA ~ V3 / (V3 + V4)) 
+# gen var:0.23 , spa. var:  NA, res. var: 0.50, h2: 0.32 and SE: 0.11
+
+## For yld2
+st_nmsu22_et_yld2 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld2)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld2, heritA ~ V1 / (V1 + V5)) 
+# gen var:0.12808683 , spa. var:  0.98321006, res. var: 0.08251119, h2: 0.61 and SE: 0.14
+
+## For yld3
+st_nmsu22_et_yld3 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld3)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld3, heritA ~ V1 / (V1 + V5)) 
+# gen var:0.25969724 , spa. var:  0.67467433, res. var: 0.09610727, h2: 0.73 and SE: 0.10
+
+## For yld4
+st_nmsu22_et_yld4 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld4 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld4)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld4, heritA ~ V1 / (V1 + V5)) 
+# gen var:0.02344976 , spa. var:  0.04140920, res. var: 0.02006766, h2: 0.54 and SE: 0.12
+
+## For yld5
+st_nmsu22_et_yld5 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld5 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm,  grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu22_et_pheno)}
+summary(st_nmsu22_et_yld5)$varcomp # to check if the model converged well
+asreml::vpredict(st_nmsu22_et_yld5, heritA ~ V1 / (V1 + V5)) 
+# gen var:0.29070261 , spa. var:  0.28910581, res. var: 0.05969409, h2: 0.83 and SE: 0.07
+
+
+```
+
+#### 2.1.1.3. Bivariate for yield without spatial
+
+```{r Bivariate models without Spatial based on NDVI ET 2022}
+colnames(nmsu22_et_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "104", "114", "yld1"
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+ ## for NDVI_62:
+mt_nmsu22_et_ndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+asreml::vpredict(mt_nmsu22_et_ndvi_62, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.9697431
+asreml::vpredict(mt_nmsu22_et_ndvi_62, res.cor ~ (V6)/sqrt(V5*V7)) # 0.2287406
+
+ ## For NDVI_76
+mt_nmsu22_et_ndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_ndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.01898793
+asreml::vpredict(mt_nmsu22_et_ndvi_76, res.cor ~ (V6)/sqrt(V5*V7)) # 0.1261295
+
+
+ ## For NDVI_90: bound for genetic, only works with diag for genetic
+mt_nmsu22_et_ndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_ndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_et_ndvi_90, res.cor ~ (V6)/sqrt(V5*V7)) # 
+
+## For NDVI_104: bound for genetic, only works with diag for genetic
+mt_nmsu22_et_ndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_ndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_et_ndvi_104, res.cor ~ (V6)/sqrt(V5*V7)) # 
+
+## For NDVI_114: bound for genetic, only works with diag for genetic
+mt_nmsu22_et_ndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_et_ndvi_114, res.cor ~ (V6)/sqrt(V5*V7)) # 
+
+
+
+# 2. For harvest window 2: "138", "144", "150", "yld2", 
+
+## For NDVI_138
+mt_nmsu22_et_ndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.934957
+asreml::vpredict(mt_nmsu22_et_ndvi_138, res.cor ~ (V6)/sqrt(V5*V7)) # 0.4981678
+
+## For NDVI_144
+mt_nmsu22_et_ndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.98
+asreml::vpredict(mt_nmsu22_et_ndvi_144, res.cor ~ (V6)/sqrt(V5*V7)) # 0.70
+
+## For NDVI_150 : 
+mt_nmsu22_et_ndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.05
+asreml::vpredict(mt_nmsu22_et_ndvi_150, res.cor ~ (V6)/sqrt(V5*V7)) # diag
+
+
+
+
+# 3. For harvest window 3:  "166", "174", "180", "yld3" 
+## For NDVI_166
+mt_nmsu22_et_ndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.9637036
+asreml::vpredict(mt_nmsu22_et_ndvi_166, res.cor ~ (V6)/sqrt(V5*V7)) # -0.1909994
+
+## For NDVI_174
+mt_nmsu22_et_ndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.9625614
+asreml::vpredict(mt_nmsu22_et_ndvi_174, res.cor ~ (V6)/sqrt(V5*V7)) # 0.3331464
+
+## For NDVI_180
+mt_nmsu22_et_ndvi_180 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_180) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_180)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_180, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.9949798
+asreml::vpredict(mt_nmsu22_et_ndvi_180, res.cor ~ (V6)/sqrt(V5*V7)) # 0.3614157
+  
+
+
+# 4. For harvest window 4: none
+
+
+# 5. For harvest window 5: "256", "264", "270", "284", "292", yld 5
+
+## For NDVI_256: 
+mt_nmsu22_et_ndvi_256 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_256) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_256)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_256, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.90
+asreml::vpredict(mt_nmsu22_et_ndvi_256, res.cor ~ (V6)/sqrt(V5*V7)) # diag
+
+## For NDVI_264
+mt_nmsu22_et_ndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.5286549
+asreml::vpredict(mt_nmsu22_et_ndvi_264, res.cor ~ (V6)/sqrt(V5*V7)) # 0.38
+
+## For NDVI_270
+mt_nmsu22_et_ndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.5574163
+asreml::vpredict(mt_nmsu22_et_ndvi_270, res.cor ~ (V6)/sqrt(V5*V7)) # 0.7069418
+
+## For NDVI_284
+mt_nmsu22_et_ndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.8958326
+asreml::vpredict(mt_nmsu22_et_ndvi_284, res.cor ~ (V6)/sqrt(V5*V7)) # -0.1087692
+
+## For NDVI_292
+mt_nmsu22_et_ndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.9309556
+asreml::vpredict(mt_nmsu22_et_ndvi_292, res.cor ~ (V6)/sqrt(V5*V7)) # 0.18
+
+```
+
+
+
+#### 2.1.1.4. Bivariate for yield with spatial
+
+```{r Bivariate with spatial NDVI ET 2022}
+colnames(nmsu22_et_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "104", "114", "yld1"
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+ ## for NDVI_62:
+mt_nmsu22_et_ndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) +us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+asreml::vpredict(mt_nmsu22_et_ndvi_62, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.8341137
+asreml::vpredict(mt_nmsu22_et_ndvi_62, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.2632507
+asreml::vpredict(mt_nmsu22_et_ndvi_62, res.cor ~ (V11)/sqrt(V10*V12)) # -0.407691
+
+
+ ## For NDVI_76 - 
+mt_nmsu22_et_ndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_ndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.1209993
+asreml::vpredict(mt_nmsu22_et_ndvi_76, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.313535
+asreml::vpredict(mt_nmsu22_et_ndvi_76, res.cor ~ (V11)/sqrt(V10*V12)) # -0.3098076
+
+ ## For NDVI_90: 
+mt_nmsu22_et_ndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_ndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.5176705
+asreml::vpredict(mt_nmsu22_et_ndvi_90, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.0305906
+asreml::vpredict(mt_nmsu22_et_ndvi_90, res.cor ~ (V11)/sqrt(V10*V12)) # - 0.2763303
+
+## For NDVI_104 
+mt_nmsu22_et_ndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_ndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6468464
+asreml::vpredict(mt_nmsu22_et_ndvi_104, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.08077386
+asreml::vpredict(mt_nmsu22_et_ndvi_104, res.cor ~ (V11)/sqrt(V10*V12)) # 0.2337132
+
+## For NDVI_114 
+mt_nmsu22_et_ndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, NDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.83068
+asreml::vpredict(mt_nmsu22_et_ndvi_114, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6600261
+asreml::vpredict(mt_nmsu22_et_ndvi_114, res.cor ~ (V11)/sqrt(V10*V12)) # 0.7001883
+
+
+# 2. For harvest window 2: "138", "144", "150", "yld2", 
+## For NDVI_138
+mt_nmsu22_et_ndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9863851
+asreml::vpredict(mt_nmsu22_et_ndvi_138, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.5771157
+asreml::vpredict(mt_nmsu22_et_ndvi_138, res.cor ~ (V11)/sqrt(V10*V12)) # 0.5961651
+
+## For NDVI_144
+mt_nmsu22_et_ndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + diag(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.88
+asreml::vpredict(mt_nmsu22_et_ndvi_144, spa.cor ~ (V5)/sqrt(V4*V6)) # diag
+asreml::vpredict(mt_nmsu22_et_ndvi_144, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+## For NDVI_150
+mt_nmsu22_et_ndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, NDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.78
+asreml::vpredict(mt_nmsu22_et_ndvi_150, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.98
+asreml::vpredict(mt_nmsu22_et_ndvi_150, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+
+
+# 3. For harvest window 3:  "166", "174","180", "yld3" 
+## For NDVI_166
+mt_nmsu22_et_ndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.89
+asreml::vpredict(mt_nmsu22_et_ndvi_166, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.08
+asreml::vpredict(mt_nmsu22_et_ndvi_166, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+
+## For NDVI_174
+mt_nmsu22_et_ndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.9742073
+asreml::vpredict(mt_nmsu22_et_ndvi_174, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4727956
+asreml::vpredict(mt_nmsu22_et_ndvi_174, res.cor ~ (V11)/sqrt(V10*V12)) # 0.7338408
+
+## For NDVI_180
+mt_nmsu22_et_ndvi_180 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, NDVI_180) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + diag(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_180)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_180, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.34
+asreml::vpredict(mt_nmsu22_et_ndvi_180, spa.cor ~ (V5)/sqrt(V4*V6)) # diag
+asreml::vpredict(mt_nmsu22_et_ndvi_180, res.cor ~ (V11)/sqrt(V10*V12)) # 0.56
+5.051309e-05/(sqrt(8.596032e-05 * 9.484102e-05))
+  
+# 4. For harvest window 4: none, out bcz of ET period
+
+# 5. For harvest window 5:  "256", "264", "270", "284", "292"
+
+## For NDVI_256: 
+mt_nmsu22_et_ndvi_256 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_256) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_256)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_256, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.2015048
+asreml::vpredict(mt_nmsu22_et_ndvi_256, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4760932
+asreml::vpredict(mt_nmsu22_et_ndvi_256, res.cor ~ (V11)/sqrt(V10*V12)) # -0.714309
+
+## For NDVI_264
+mt_nmsu22_et_ndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.94804
+asreml::vpredict(mt_nmsu22_et_ndvi_264, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4502897
+asreml::vpredict(mt_nmsu22_et_ndvi_264, res.cor ~ (V11)/sqrt(V10*V12)) # 0.2068542
+
+## For NDVI_270
+mt_nmsu22_et_ndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.5757416
+asreml::vpredict(mt_nmsu22_et_ndvi_270, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.8299576
+asreml::vpredict(mt_nmsu22_et_ndvi_270, res.cor ~ (V11)/sqrt(V10*V12)) # 0.4554774
+
+## For NDVI_284: 
+mt_nmsu22_et_ndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6118516
+asreml::vpredict(mt_nmsu22_et_ndvi_284, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3176299
+asreml::vpredict(mt_nmsu22_et_ndvi_284, res.cor ~ (V11)/sqrt(V10*V12)) # 0.4687594
+
+## For NDVI_292: 
+mt_nmsu22_et_ndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, NDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_ndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_ndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.3655154
+asreml::vpredict(mt_nmsu22_et_ndvi_292, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.100122
+asreml::vpredict(mt_nmsu22_et_ndvi_292, res.cor ~ (V11)/sqrt(V10*V12)) # 0.6140479
+
+```
+
+
+
+
+
+
+
+## 2.2. For GNDVI 
+#### 2.2.1.1. Univariate for yield without spatial
+#### 2.2.1.2. Univariate for yield with spatial
+  ### univariate are same so not needed here, same as NDVI section above as it's for yield.
+
+
+- For Harvest window 1:  62, 76, 90, 96, 104,110, 114 and yld1
+- For Harvest window 2: "130", "138", "144", "150" and yld2
+- For Harvest window 3: "166", "174","180", "yld3"
+- For Harvest window 4: "yld4"
+- For Harvest window 5: "256", "264", "270", "278", "284", "292", "yld5"
+ = 25 total traits 
+
+sdfjhksdhfdskf copy from ndvi and paste as et, then double check the time points.,, 
+
+
+
+#### 2.2.1.3. Bivariate for yield without spatial
+
+
+```{r Bivariate models without Spatial based on GNDVI ET 2022}
+colnames(nmsu22_et_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "96", "104", "110", "114", "yld1"
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+ ## for GNDVI_62:
+mt_nmsu22_et_gndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+asreml::vpredict(mt_nmsu22_et_gndvi_62, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.234622
+asreml::vpredict(mt_nmsu22_et_gndvi_62, res.cor ~ (V6)/sqrt(V5*V7)) # 0.3662845
+
+ ## For GNDVI_76
+mt_nmsu22_et_gndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8963954
+asreml::vpredict(mt_nmsu22_et_gndvi_76, res.cor ~ (V6)/sqrt(V5*V7)) # 0.3874995
+
+
+ ## For GNDVI_90: 
+mt_nmsu22_et_gndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.9605303
+asreml::vpredict(mt_nmsu22_et_gndvi_90, res.cor ~ (V6)/sqrt(V5*V7)) # - 0.09
+
+## For GNDVI_96: 
+mt_nmsu22_et_gndvi_96 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_96) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_96)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_96, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.7340523
+asreml::vpredict(mt_nmsu22_et_gndvi_96, res.cor ~ (V6)/sqrt(V5*V7)) #  0.07746338
+
+## For GNDVI_104: bound
+mt_nmsu22_et_gndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # 
+asreml::vpredict(mt_nmsu22_et_gndvi_104, res.cor ~ (V6)/sqrt(V5*V7)) # 
+
+
+
+## For GNDVI_114: 
+mt_nmsu22_et_gndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.01853662
+asreml::vpredict(mt_nmsu22_et_gndvi_114, res.cor ~ (V6)/sqrt(V5*V7)) # 0.5049902
+
+
+
+# 2. For harvest window 2: "130", "138", "144", "150", "yld2", 
+
+## For GNDVI_130
+mt_nmsu22_et_gndvi_130 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_130) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_130)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_130, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6943274
+asreml::vpredict(mt_nmsu22_et_gndvi_130, res.cor ~ (V6)/sqrt(V5*V7)) # 0.487057
+
+## For GNDVI_138
+mt_nmsu22_et_gndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.5056137
+asreml::vpredict(mt_nmsu22_et_gndvi_138, res.cor ~ (V6)/sqrt(V5*V7)) # 0.3810523
+
+## For GNDVI_144
+mt_nmsu22_et_gndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.834969
+asreml::vpredict(mt_nmsu22_et_gndvi_144, res.cor ~ (V6)/sqrt(V5*V7)) # 0.6881815
+
+## For GNDVI_150 : 
+mt_nmsu22_et_gndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9756707
+asreml::vpredict(mt_nmsu22_et_gndvi_150, res.cor ~ (V6)/sqrt(V5*V7)) # 0.8491808
+
+
+
+
+# 3. For harvest window 3:  "166", "174", "180", "yld3" 
+## For GNDVI_166
+mt_nmsu22_et_gndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8046159
+asreml::vpredict(mt_nmsu22_et_gndvi_166, res.cor ~ (V6)/sqrt(V5*V7)) # 0.6444093
+
+## For GNDVI_174
+mt_nmsu22_et_gndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.1167405
+asreml::vpredict(mt_nmsu22_et_gndvi_174, res.cor ~ (V6)/sqrt(V5*V7)) # 0.231189
+
+## For GNDVI_180
+mt_nmsu22_et_gndvi_180 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_180) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_180)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_180, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.8683234
+asreml::vpredict(mt_nmsu22_et_gndvi_180, res.cor ~ (V6)/sqrt(V5*V7)) # 0.099586
+  
+
+
+# 4. For harvest window 4: none
+
+
+# 5. For harvest window 5: "256", "264", "270", "278", "284", "292", yld 5
+
+## For GNDVI_256: 
+mt_nmsu22_et_gndvi_256 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_256) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_256)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_256, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.02620773
+asreml::vpredict(mt_nmsu22_et_gndvi_256, res.cor ~ (V6)/sqrt(V5*V7)) # 0.3242831
+
+## For GNDVI_264
+mt_nmsu22_et_gndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7618024
+asreml::vpredict(mt_nmsu22_et_gndvi_264, res.cor ~ (V6)/sqrt(V5*V7)) # 0.6343272
+
+## For GNDVI_270
+mt_nmsu22_et_gndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9991839
+asreml::vpredict(mt_nmsu22_et_gndvi_270, res.cor ~ (V6)/sqrt(V5*V7)) # 0.7530617
+
+## For GNDVI_278
+mt_nmsu22_et_gndvi_278 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_278) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_278)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_278, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.4892682
+asreml::vpredict(mt_nmsu22_et_gndvi_278, res.cor ~ (V6)/sqrt(V5*V7)) # 0.1597266
+
+## For GNDVI_284
+mt_nmsu22_et_gndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.002764574
+asreml::vpredict(mt_nmsu22_et_gndvi_284, res.cor ~ (V6)/sqrt(V5*V7)) # 0.4285541
+
+## For GNDVI_292
+mt_nmsu22_et_gndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.1029625
+asreml::vpredict(mt_nmsu22_et_gndvi_292, res.cor ~ (V6)/sqrt(V5*V7)) # 0.07906954
+
+```
+
+
+
+#### 2.2.1.4. Bivariate for yield with spatial
+
+
+```{r Bivariate with spatial GNDVI ET 2022}
+colnames(nmsu22_et_pheno)
+
+## lets proceed with calculation for all harvest windows
+# 1.  For harvest window 1 "62", "76", "90", "96", "104", "110", "114", "yld1"
+asreml.options(maxit = 300, extra = 300)
+## now run the models multitrait with yld from each window with its imaging events
+
+## for GNDVI_62:
+mt_nmsu22_et_gndvi_62 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_62) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) +us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_62)$varcomp # residual varaince scaling for multivariate model (4th row) is set to 1 to make residual correlation structure identifiable.
+asreml::vpredict(mt_nmsu22_et_gndvi_62, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9380776
+asreml::vpredict(mt_nmsu22_et_gndvi_62, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.8390832
+asreml::vpredict(mt_nmsu22_et_gndvi_62, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+
+ ## For GNDVI_76 - 
+mt_nmsu22_et_gndvi_76 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_76) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_76)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_76, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9976949
+asreml::vpredict(mt_nmsu22_et_gndvi_76, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4974418
+asreml::vpredict(mt_nmsu22_et_gndvi_76, res.cor ~ (V11)/sqrt(V10*V12)) # 0.8692595
+
+ ## For GNDVI_90: 
+mt_nmsu22_et_gndvi_90 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_90) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_90)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_90, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8629566
+asreml::vpredict(mt_nmsu22_et_gndvi_90, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6602697
+asreml::vpredict(mt_nmsu22_et_gndvi_90, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+## For GNDVI_96: 
+mt_nmsu22_et_gndvi_96 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_96) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_96)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_96, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9190446
+asreml::vpredict(mt_nmsu22_et_gndvi_96, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.2292429
+asreml::vpredict(mt_nmsu22_et_gndvi_96, res.cor ~ (V11)/sqrt(V10*V12)) # 0.7449104
+
+## For GNDVI_104 
+mt_nmsu22_et_gndvi_104 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_104) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_104)$varcomp # 
+asreml::vpredict(mt_nmsu22_et_gndvi_104, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7354527
+asreml::vpredict(mt_nmsu22_et_gndvi_104, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.134075
+asreml::vpredict(mt_nmsu22_et_gndvi_104, res.cor ~ (V11)/sqrt(V10*V12)) # 0.798134
+
+
+## For GNDVI_114 
+mt_nmsu22_et_gndvi_114 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_114) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_114)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_114, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.5130809
+asreml::vpredict(mt_nmsu22_et_gndvi_114, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3738768
+asreml::vpredict(mt_nmsu22_et_gndvi_114, res.cor ~ (V11)/sqrt(V10*V12)) # 0.7252035
+
+
+# 2. For harvest window 2: "130", "138", "144", "150", "yld2", 
+## For GNDVI_130
+mt_nmsu22_et_gndvi_130 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_130) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_130)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_130, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7317891
+asreml::vpredict(mt_nmsu22_et_gndvi_130, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.409049
+asreml::vpredict(mt_nmsu22_et_gndvi_130, res.cor ~ (V11)/sqrt(V10*V12)) # 0.7662119
+
+
+## For GNDVI_138
+mt_nmsu22_et_gndvi_138 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_138) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_138)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_138, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7129305
+asreml::vpredict(mt_nmsu22_et_gndvi_138, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3684452
+asreml::vpredict(mt_nmsu22_et_gndvi_138, res.cor ~ (V11)/sqrt(V10*V12)) # 0.9706936
+
+## For GNDVI_144
+mt_nmsu22_et_gndvi_144 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_144) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_144)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_144, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.806035
+asreml::vpredict(mt_nmsu22_et_gndvi_144, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.7161231
+asreml::vpredict(mt_nmsu22_et_gndvi_144, res.cor ~ (V11)/sqrt(V10*V12)) # 0.6335536
+
+## For GNDVI_150
+mt_nmsu22_et_gndvi_150 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_150) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_150)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_150, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8288367
+asreml::vpredict(mt_nmsu22_et_gndvi_150, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.9341437
+asreml::vpredict(mt_nmsu22_et_gndvi_150, res.cor ~ (V11)/sqrt(V10*V12)) # 0.8500274
+
+
+
+# 3. For harvest window 3:  "166", "174","180", "yld3" 
+## For GNDVI_166
+mt_nmsu22_et_gndvi_166 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_166) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_166)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_166, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8965227
+asreml::vpredict(mt_nmsu22_et_gndvi_166, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6120084
+asreml::vpredict(mt_nmsu22_et_gndvi_166, res.cor ~ (V11)/sqrt(V10*V12)) # 0.6203659
+
+
+## For GNDVI_174
+mt_nmsu22_et_gndvi_174 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_174) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_174)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_174, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9088766
+asreml::vpredict(mt_nmsu22_et_gndvi_174, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6975339
+asreml::vpredict(mt_nmsu22_et_gndvi_174, res.cor ~ (V11)/sqrt(V10*V12)) # 0.7713746
+
+## For GNDVI_180
+mt_nmsu22_et_gndvi_180 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_180) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_180)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_180, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8424085
+asreml::vpredict(mt_nmsu22_et_gndvi_180, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4517871
+asreml::vpredict(mt_nmsu22_et_gndvi_180, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+# 4. For harvest window 4: none, out bcz of ET period
+
+# 5. For harvest window 5:  "256", "264", "270", "278", "284", "292"
+
+## For GNDVI_256: 
+mt_nmsu22_et_gndvi_256 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_256) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_256)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_256, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9125113
+asreml::vpredict(mt_nmsu22_et_gndvi_256, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.616979
+asreml::vpredict(mt_nmsu22_et_gndvi_256, res.cor ~ (V11)/sqrt(V10*V12)) # 0.6435723
+
+## For GNDVI_264
+mt_nmsu22_et_gndvi_264 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_264) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_264)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_264, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8853239
+asreml::vpredict(mt_nmsu22_et_gndvi_264, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.7526155
+asreml::vpredict(mt_nmsu22_et_gndvi_264, res.cor ~ (V11)/sqrt(V10*V12)) # 0.6545729
+
+## For GNDVI_270
+mt_nmsu22_et_gndvi_270 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_270) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_270)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_270, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.9537701
+asreml::vpredict(mt_nmsu22_et_gndvi_270, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.8215292
+asreml::vpredict(mt_nmsu22_et_gndvi_270, res.cor ~ (V11)/sqrt(V10*V12)) # 0.5296318
+
+## For GNDVI_278
+mt_nmsu22_et_gndvi_278 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_278) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_278)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_278, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7990656
+asreml::vpredict(mt_nmsu22_et_gndvi_278, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4593878
+asreml::vpredict(mt_nmsu22_et_gndvi_278, res.cor ~ (V11)/sqrt(V10*V12)) # 0.7383811
+
+## For GNDVI_284: 
+mt_nmsu22_et_gndvi_284 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_284) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_284)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_284, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.5044502
+asreml::vpredict(mt_nmsu22_et_gndvi_284, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.5552077
+asreml::vpredict(mt_nmsu22_et_gndvi_284, res.cor ~ (V11)/sqrt(V10*V12)) # 0.5655953
+
+## For GNDVI_292: 
+mt_nmsu22_et_gndvi_292 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld5, GNDVI_292) ~ 1 + Rep, #rep effect as fixed
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = nmsu22_et_pheno)}
+summary(mt_nmsu22_et_gndvi_292)$varcomp # to check if the model converged well
+asreml::vpredict(mt_nmsu22_et_gndvi_292, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.2747943
+asreml::vpredict(mt_nmsu22_et_gndvi_292, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.237456
+asreml::vpredict(mt_nmsu22_et_gndvi_292, res.cor ~ (V11)/sqrt(V10*V12)) # 0.6360765
+
+```
+
+
+
+ 
+ 

@@ -1,0 +1,892 @@
+---
+title: "Running bivariate models (mt models) with GRM and spatial to calculate genetic and spatial correlations"
+author: "Dinesh Ghimire"
+date: "2026-05-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,etc..) particularly helpful. I'd be familiar with those before using this script
+# List of required packages
+required_packages <- c("dplyr","asreml", "readxl", "tidyr", "ggplot2", "reshape2","data.table", "viridis","grid", "gridExtra", "GGally")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NY-DG"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NY-DG 
+#below is what I get when I call getwd. Just check to make sure that the root for this script is the base of the github project, sometimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa-NY-DG"
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If something is misssing please let me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NY cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+
+
+
+#NY 22
+
+
+################################# Musgrave Trial ################################
+
+
+
+1. *NY Musgrave 2022 *
+
+Loading and preparing data files
+```{r loading files 05072026}
+#import merged phenotype file 
+ny_mus_pheno_22 <- read.csv("2022/MSI_data/output_files/Final_NY22_mus_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X) # remove index column
+
+# need to convert into factors
+ny_mus_pheno_22[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_mus_pheno_22[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_mus_pheno_22) 
+str(ny_mus_pheno_22)
+
+
+#import genotype file
+grm_aa_ny<- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1, check.names = FALSE)
+grm_aa_ny  <- as.matrix(grm_aa_ny)
+mean(diag(grm_aa_ny )) # 1
+hist(diag(grm_aa_ny ))
+
+
+grm_agh <- grm_aa_ny +diag(.0005,length(grm_aa_ny [,1]),length(grm_aa_ny [,1])) # adding 0.05 nugget/ridge to ensure matrix is strictly positive definite
+grm_inverse <- solve(grm_agh)
+
+```
+
+
+- Scaling and outlier check on yield already done in script1, so we can jump into running models
+
+RUN for all... 
+
+## 1.2. For GNDVI 
+- For Harvest window 1:  131, 145, 154, and yld1
+- For Harvest window 2:  159, 162, 164, 175, 178, 181, 187, 189, 192, 201, 203, and yld2
+- For Harvest window 3: 210, 215, 223, 236, 238, 243, 259, 263, yld3
+
+
+## only running bivariate for yield with ar spatial to see how MSI and corresponding yield are 
+# Bivariate for yield with spatial
+- if doesn't run, try sca_yld OR simpler model structure like diag instead of unstructured or one dimensional spatial
+- always double check correlation value formula (shortcut used like V10 or V11 being used in the equation)
+
+```{r Multitrait model, GNDVI All flights, 05112026}
+### Multitrait model
+asreml.options(extra=200, maxit =200) 
+unique(ny_mus_pheno_22$Germplasm)
+##################### Harvest 1 Window ####################
+ # - For Harvest window 1:  131, 145, 154, and yld1
+
+# GNDVI_131 : 
+mt_mus_pheno_22_gndvi_131 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_131) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # diag resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_131)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_131, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6881653
+asreml::vpredict(mt_mus_pheno_22_gndvi_131, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.5979523
+asreml::vpredict(mt_mus_pheno_22_gndvi_131, res.cor ~ (V11)/sqrt(V10*V12)) 
+
+
+
+
+# GNDVI_145 
+mt_mus_pheno_22_gndvi_145 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_145) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_145)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_145, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6569631
+asreml::vpredict(mt_mus_pheno_22_gndvi_145, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3435204
+asreml::vpredict(mt_mus_pheno_22_gndvi_145, res.cor ~ (V11)/sqrt(V10*V12)) 
+
+# GNDVI_154 
+mt_mus_pheno_22_gndvi_154 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_154) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_154)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_154, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7982475
+asreml::vpredict(mt_mus_pheno_22_gndvi_154, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.551793
+asreml::vpredict(mt_mus_pheno_22_gndvi_154, res.cor ~ (V11)/sqrt(V10*V12)) 
+
+
+
+
+
+##################### Harvest 2 Window ####################
+# For Harvest window 2:  159, 162, 164, 175, 178, 181, 187, 189, 192, 201, 203, and yld2
+
+# GNDVI_159 
+mt_mus_pheno_22_gndvi_159 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_159) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_159)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_159, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6224571
+asreml::vpredict(mt_mus_pheno_22_gndvi_159, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.04083438
+asreml::vpredict(mt_mus_pheno_22_gndvi_159, res.cor ~ (V11)/sqrt(V10*V12)) 
+
+# GNDVI_162 
+mt_mus_pheno_22_gndvi_162 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_162) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_162)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_162, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6498479
+asreml::vpredict(mt_mus_pheno_22_gndvi_162, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.1260206
+asreml::vpredict(mt_mus_pheno_22_gndvi_162, res.cor ~ (V11)/sqrt(V10*V12)) 
+
+
+# GNDVI_164 (worked iwth yld, not sca_yld)
+mt_mus_pheno_22_gndvi_164 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld2, GNDVI_164) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_164)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_164, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6372299
+asreml::vpredict(mt_mus_pheno_22_gndvi_164, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.1630968
+asreml::vpredict(mt_mus_pheno_22_gndvi_164, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+
+# GNDVI_175 
+mt_mus_pheno_22_gndvi_175 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_175) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_175)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_175, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8049411
+asreml::vpredict(mt_mus_pheno_22_gndvi_175, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.2569012
+asreml::vpredict(mt_mus_pheno_22_gndvi_175, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_178 
+mt_mus_pheno_22_gndvi_178 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_178) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_178)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_178, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7540542
+asreml::vpredict(mt_mus_pheno_22_gndvi_178, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3804054
+asreml::vpredict(mt_mus_pheno_22_gndvi_178, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_181 (worked with yld2)
+mt_mus_pheno_22_gndvi_181 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld2, GNDVI_181) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_181)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_181, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7670361
+asreml::vpredict(mt_mus_pheno_22_gndvi_181, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3409831
+asreml::vpredict(mt_mus_pheno_22_gndvi_181, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_187 
+mt_mus_pheno_22_gndvi_187 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_187) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_187)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_187, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.8549017
+asreml::vpredict(mt_mus_pheno_22_gndvi_187, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4881311
+asreml::vpredict(mt_mus_pheno_22_gndvi_187, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_189 
+mt_mus_pheno_22_gndvi_189 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_189) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_189)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_189, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.7816049
+asreml::vpredict(mt_mus_pheno_22_gndvi_189, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6029039
+asreml::vpredict(mt_mus_pheno_22_gndvi_189, res.cor ~ (V11)/sqrt(V10*V12)) 
+
+
+# GNDVI_192 (worked iwth yld2)
+mt_mus_pheno_22_gndvi_192 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld2, GNDVI_192) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_192)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_192, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6509408
+asreml::vpredict(mt_mus_pheno_22_gndvi_192, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6777008
+asreml::vpredict(mt_mus_pheno_22_gndvi_192, res.cor ~ (V11)/sqrt(V10*V12)) # 
+(2.716697e-05)/ sqrt(1.087104e-03)*sqrt(5.875462e-06)
+
+# GNDVI_201 
+mt_mus_pheno_22_gndvi_201 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_201) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_201)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_201, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.6827731
+asreml::vpredict(mt_mus_pheno_22_gndvi_201, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6031344
+asreml::vpredict(mt_mus_pheno_22_gndvi_201, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_203 
+mt_mus_pheno_22_gndvi_203 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_203) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_203)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_203, gen.cor ~ (V2)/sqrt(V1*V3)) # -0.06414355
+asreml::vpredict(mt_mus_pheno_22_gndvi_203, spa.cor ~ (V5)/sqrt(V4*V6)) # -0.02408801
+asreml::vpredict(mt_mus_pheno_22_gndvi_203, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+
+
+
+
+##################### Harvest 3 Window ####################
+#For Harvest window 3: 210, 215, 223, 236, 238, 243, 259, 263, yld3
+
+# GNDVI_210 : bad (remove)
+mt_mus_pheno_22_gndvi_210 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_210) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_210)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_210, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.41
+asreml::vpredict(mt_mus_pheno_22_gndvi_210, spa.cor ~ (V5)/sqrt(V4*V6)) # 0
+asreml::vpredict(mt_mus_pheno_22_gndvi_210, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_215 : bad remove
+mt_mus_pheno_22_gndvi_215 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_215) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_215)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_215, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.1789935
+asreml::vpredict(mt_mus_pheno_22_gndvi_215, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4212035
+asreml::vpredict(mt_mus_pheno_22_gndvi_215, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_223 
+mt_mus_pheno_22_gndvi_223 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_223) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_223)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_223, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.1501679
+asreml::vpredict(mt_mus_pheno_22_gndvi_223, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4342083
+asreml::vpredict(mt_mus_pheno_22_gndvi_223, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_236 : 
+mt_mus_pheno_22_gndvi_236 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_236) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_236)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_236, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.2810241
+asreml::vpredict(mt_mus_pheno_22_gndvi_236, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.5123481
+asreml::vpredict(mt_mus_pheno_22_gndvi_236, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_238 : 
+mt_mus_pheno_22_gndvi_238 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_238) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_238)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_238, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.307748
+asreml::vpredict(mt_mus_pheno_22_gndvi_238, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.5657587
+asreml::vpredict(mt_mus_pheno_22_gndvi_238, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_243 : 
+mt_mus_pheno_22_gndvi_243 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_243) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_243)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_243, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.4380544
+asreml::vpredict(mt_mus_pheno_22_gndvi_243, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6155311
+asreml::vpredict(mt_mus_pheno_22_gndvi_243, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_259 : 
+mt_mus_pheno_22_gndvi_259 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_259) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_259)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_259, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.3762865
+asreml::vpredict(mt_mus_pheno_22_gndvi_259, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.5476225
+asreml::vpredict(mt_mus_pheno_22_gndvi_259, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+# GNDVI_263 : 
+mt_mus_pheno_22_gndvi_263 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_263) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait), # us resid
+         data = ny_mus_pheno_22)}
+summary(mt_mus_pheno_22_gndvi_263)$varcomp
+asreml::vpredict(mt_mus_pheno_22_gndvi_263, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.2855455
+asreml::vpredict(mt_mus_pheno_22_gndvi_263, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.6006065
+asreml::vpredict(mt_mus_pheno_22_gndvi_263, res.cor ~ (V11)/sqrt(V10*V12)) # 
+
+```
+
+
+Based on assessment of flight quality, I removed flights 203, 210, 215, 223
+
+
+## Graphs: Genetic and Spatial trend throughout the season
+```{r Mt models graphs GNDVI Musgrave 2022 05122026}
+mt_models_gndvi_mus_22 <- read.csv("2022/MSI_data/output_files/MT_models_GC_SC_values_GNDVI_Musgrave_2022.csv")
+colnames(mt_models_gndvi_mus_22)
+# Use your dataframe
+df_gndvi_mus_22 <- mt_models_gndvi_mus_22
+# Preserve order of Trait
+df_gndvi_mus_22$Trait <- factor(df_gndvi_mus_22$Trait, levels = df_gndvi_mus_22$Trait)
+
+# ---- Graph 1: Genetic1 only ----
+df_gndvi_mus_22_no_spa <- df_gndvi_mus_22 %>%
+  select(Trait, Genetic) %>%
+  pivot_longer(-Trait, names_to = "Component", values_to = "Value")
+
+gndvi_mus_22_p1 <- ggplot(df_gndvi_mus_22_no_spa, aes(x = Trait, y = Value, color = Component, group = Component)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "Bivariate GNDVI without Spatial  mus 2022",
+       y = "Correlation")
+gndvi_mus_22_p1
+# ---- Graph 2: Genetic, & Spatial  ----
+df_gndvi_mus_22_spa <- df_gndvi_mus_22 %>%
+  select(Trait, Genetic, Spatial) %>%
+  pivot_longer(-Trait, names_to = "Component", values_to = "Value") %>%
+  filter(!is.na(Value))
+
+gndvi_mus_22_p2 <- ggplot(df_gndvi_mus_22_spa, aes(x = Trait, y = Value, color = Component, group = Component)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Genetic" = "forestgreen", 
+                                "Spatial" = "darkorange")) +
+  scale_linetype_manual(values = c("Genetic" = "solid", 
+                                   "Spatial" = "solid")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "GNDVI Trend over Musgrave 2022",
+       y = "Correlation")
+
+# Show both plots
+gndvi_mus_22_p1 # only genetic
+gndvi_mus_22_p2 # genetic and spatial
+
+# ggsave
+ggsave("2022/output_images/Genetic_Spatial_Correlations_NY_Musgrave_2022.png", gndvi_mus_22_p2, width = 8, height = 6, dpi = 400)
+```
+
+
+
+
+
+
+
+
+################################# Snyder Trial ################################
+
+1. *NY Snyder 2022 *
+
+Loading and preparing data files
+```{r loading files 05122026}
+#import merged phenotype file 
+ny_sny_pheno_22 <- read.csv("2022/MSI_data/output_files/Final_NY22_sny_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X) # remove index column
+
+# need to convert into factors
+ny_sny_pheno_22[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_sny_pheno_22[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_sny_pheno_22) 
+str(ny_sny_pheno_22)
+
+
+#import genotype file
+grm_aa_ny<- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1, check.names = FALSE)
+grm_aa_ny  <- as.matrix(grm_aa_ny)
+mean(diag(grm_aa_ny )) # 1
+hist(diag(grm_aa_ny ))
+
+
+grm_agh <- grm_aa_ny +diag(.0005,length(grm_aa_ny [,1]),length(grm_aa_ny [,1])) # adding 0.05 nugget/ridge to ensure matrix is strictly positive definite
+grm_inverse <- solve(grm_agh)
+
+```
+
+
+- Scaling and outlier check on yield already done in script1, so we can jump into running models
+
+RUN for all... 
+
+## 1.2. For GNDVI 
+- For Harvest window 1:  133, 159, 164, and yld1
+- For Harvest window 2:  168, 171, 175, 178, 181, 187, 189, 192, 194, 196, 207, and yld2
+- For Harvest window 3: 223, 231, 236, 238, 243, 245, 252, 258, 259, yld3
+= total 23 flights
+
+
+## only running bivariate for yield with ar spatial to see how MSI and corresponding yield are 
+# Bivariate for yield with spatial
+- if doesn't run, try sca_yld OR simpler model structure like diag instead of unstructured or one dimensional spatial
+
+
+```{r Multitrait model, GNDVI All flights, Snyder 05122026}
+### Multitrait model
+asreml.options(extra=200, maxit =200) 
+unique(ny_sny_pheno_22$Germplasm)
+##################### Harvest 1 Window ####################
+ # - For Harvest window 1:  133, 159, 164, and yld1
+
+# GNDVI_133 : 
+mt_sny_pheno_22_gndvi_133 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_133) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_133)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_133, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.4901762
+asreml::vpredict(mt_sny_pheno_22_gndvi_133, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3388202
+asreml::vpredict(mt_sny_pheno_22_gndvi_133, res.cor ~ (V11)/sqrt(V10*V12)) # 0.9639333
+
+
+
+# GNDVI_159 
+mt_sny_pheno_22_gndvi_159 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_159) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait),
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_159)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_159, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.307729
+asreml::vpredict(mt_sny_pheno_22_gndvi_159, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.1083884
+asreml::vpredict(mt_sny_pheno_22_gndvi_159, res.cor ~ (V11)/sqrt(V10*V12)) # 0.1920479
+
+# GNDVI_164 
+mt_sny_pheno_22_gndvi_164 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld1, GNDVI_164) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait), # diag resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_164)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_164, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.03
+asreml::vpredict(mt_sny_pheno_22_gndvi_164, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.17
+asreml::vpredict(mt_sny_pheno_22_gndvi_164, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+
+
+
+
+##################### Harvest 2 Window ####################
+# For Harvest window 2:  168, 171, 175, 178, 181, 187, 189, 192, 194, 196, 207, and yld2
+
+# GNDVI_168 : bad flight
+mt_sny_pheno_22_gndvi_168 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld2, GNDVI_168) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):diag(trait), # diag resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_168)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_168, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.05907064 
+asreml::vpredict(mt_sny_pheno_22_gndvi_168, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.06646539
+asreml::vpredict(mt_sny_pheno_22_gndvi_168, res.cor ~ (V11)/sqrt(V10*V12)) # - 0.645327
+
+# GNDVI_171 #
+mt_sny_pheno_22_gndvi_171 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_171) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):diag(trait),# diag residual
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_171)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_171, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.28
+asreml::vpredict(mt_sny_pheno_22_gndvi_171, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.05
+asreml::vpredict(mt_sny_pheno_22_gndvi_171, res.cor ~ (V11)/sqrt(V10*V12)) # 0.74
+
+# GNDVI_175 #
+mt_sny_pheno_22_gndvi_175 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_175) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):diag(trait), # diag residual
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_175)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_175, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.5373959
+asreml::vpredict(mt_sny_pheno_22_gndvi_175, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.2384265
+asreml::vpredict(mt_sny_pheno_22_gndvi_175, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+
+# GNDVI_178 #
+mt_sny_pheno_22_gndvi_178 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_178) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):diag(trait), # diag residual
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_178)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_178, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.5556746
+asreml::vpredict(mt_sny_pheno_22_gndvi_178, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.4159851
+asreml::vpredict(mt_sny_pheno_22_gndvi_178, res.cor ~ (V11)/sqrt(V10*V12)) # diag residual
+
+
+# GNDVI_181 #
+mt_sny_pheno_22_gndvi_181 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_181) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):diag(trait),
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_181)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_181, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.52
+asreml::vpredict(mt_sny_pheno_22_gndvi_181, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.24
+asreml::vpredict(mt_sny_pheno_22_gndvi_181, res.cor ~ (V11)/sqrt(V10*V12)) # diag residual
+
+
+# GNDVI_187 #
+mt_sny_pheno_22_gndvi_187 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_187) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):us(trait),
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_187)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_187, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.3298013
+asreml::vpredict(mt_sny_pheno_22_gndvi_187, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.17
+asreml::vpredict(mt_sny_pheno_22_gndvi_187, res.cor ~ (V11)/sqrt(V10*V12)) # 0.19
+
+
+# GNDVI_189 #
+mt_sny_pheno_22_gndvi_189 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_189) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):diag(trait), # diag residual
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_189)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_189, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.35
+asreml::vpredict(mt_sny_pheno_22_gndvi_189, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.20
+asreml::vpredict(mt_sny_pheno_22_gndvi_189, res.cor ~ (V11)/sqrt(V10*V12)) # diag residual
+
+
+# GNDVI_192 # bad flight
+mt_sny_pheno_22_gndvi_192 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(sca_yld2, GNDVI_192) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):diag(trait),
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_192)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_192, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.32
+asreml::vpredict(mt_sny_pheno_22_gndvi_192, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.1
+asreml::vpredict(mt_sny_pheno_22_gndvi_192, res.cor ~ (V11)/sqrt(V10*V12)) # diag
+
+
+# GNDVI_194 #
+mt_sny_pheno_22_gndvi_194 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_194) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):us(trait),
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_194)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_194, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.27
+asreml::vpredict(mt_sny_pheno_22_gndvi_194, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.21
+asreml::vpredict(mt_sny_pheno_22_gndvi_194, res.cor ~ (V11)/sqrt(V10*V12)) # 0.45
+
+
+# GNDVI_196 #
+mt_sny_pheno_22_gndvi_196 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_196) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):us(trait),
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_196)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_196, gen.cor ~ (V2)/sqrt(V1*V3)) #0.30
+asreml::vpredict(mt_sny_pheno_22_gndvi_196, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.41
+asreml::vpredict(mt_sny_pheno_22_gndvi_196, res.cor ~ (V11)/sqrt(V10*V12)) # 0.32
+
+
+# GNDVI_207 #
+mt_sny_pheno_22_gndvi_207 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = cbind(yld2, GNDVI_207) ~ trait,
+    random = ~ us(trait):vm(Germplasm, grm_inverse) +
+      us(trait):ar1(Row):ar1(Range),
+    residual = ~ id(units):us(trait),
+    data = ny_sny_pheno_22)}
+
+summary(mt_sny_pheno_22_gndvi_207)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_207, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.32
+asreml::vpredict(mt_sny_pheno_22_gndvi_207, spa.cor ~ (V5)/sqrt(V4*V6)) # -0.14
+asreml::vpredict(mt_sny_pheno_22_gndvi_207, res.cor ~ (V11)/sqrt(V10*V12)) # 0.15
+
+
+
+
+
+##################### Harvest 3 Window ####################
+#For Harvest window 3: 223, 231, 236, 238, 243, 245, 252, 258, 259, yld3
+
+# GNDVI_223 # bad flight here(could be informative, but not in my study)
+mt_sny_pheno_22_gndvi_223 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(sca_yld3, GNDVI_223) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_223)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_223, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.4682964
+asreml::vpredict(mt_sny_pheno_22_gndvi_223, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.4912361
+asreml::vpredict(mt_sny_pheno_22_gndvi_223, res.cor ~ (V11)/sqrt(V10*V12)) # 0.96
+
+# GNDVI_231 : bad flight here(could be informative, but not in my study)
+mt_sny_pheno_22_gndvi_231 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_231) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_231)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_231, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.5063595
+asreml::vpredict(mt_sny_pheno_22_gndvi_231, spa.cor ~ (V5)/sqrt(V4*V6)) # - 0.438223
+asreml::vpredict(mt_sny_pheno_22_gndvi_231, res.cor ~ (V11)/sqrt(V10*V12)) # 0.6696606
+
+# GNDVI_236 : bad flight here(could be informative, but not in my study)
+mt_sny_pheno_22_gndvi_236 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_236) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_236)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_236, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.4771722
+asreml::vpredict(mt_sny_pheno_22_gndvi_236, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.1728919
+asreml::vpredict(mt_sny_pheno_22_gndvi_236, res.cor ~ (V11)/sqrt(V10*V12)) # 0.3186256
+
+# GNDVI_238 : bad flight here(could be informative, but not in my study)
+mt_sny_pheno_22_gndvi_238 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_238) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_238)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_238, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.5063141
+asreml::vpredict(mt_sny_pheno_22_gndvi_238, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.14
+asreml::vpredict(mt_sny_pheno_22_gndvi_238, res.cor ~ (V11)/sqrt(V10*V12)) # 0.46
+
+# GNDVI_243 : bad flight here(could be informative, but not in my study)
+mt_sny_pheno_22_gndvi_243 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_243) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_243)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_243, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.3506548
+asreml::vpredict(mt_sny_pheno_22_gndvi_243, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.1466783
+asreml::vpredict(mt_sny_pheno_22_gndvi_243, res.cor ~ (V11)/sqrt(V10*V12)) # 0.2959028
+
+# GNDVI_245 : bad flight here(could be informative, but not in my study)
+mt_sny_pheno_22_gndvi_245 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_245) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_245)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_245, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.3580192
+asreml::vpredict(mt_sny_pheno_22_gndvi_245, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.13
+asreml::vpredict(mt_sny_pheno_22_gndvi_245, res.cor ~ (V11)/sqrt(V10*V12)) # -0.12
+
+# GNDVI_252 : bad flight here(could be informative, but not in my study)
+mt_sny_pheno_22_gndvi_252 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_252) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_252)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_252, gen.cor ~ (V2)/sqrt(V1*V3)) # - 0.1
+asreml::vpredict(mt_sny_pheno_22_gndvi_252, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.23
+asreml::vpredict(mt_sny_pheno_22_gndvi_252, res.cor ~ (V11)/sqrt(V10*V12)) # - 0.003
+
+# GNDVI_258 
+mt_sny_pheno_22_gndvi_258 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_258) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_258)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_258, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.2401172
+asreml::vpredict(mt_sny_pheno_22_gndvi_258, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.3642449
+asreml::vpredict(mt_sny_pheno_22_gndvi_258, res.cor ~ (V11)/sqrt(V10*V12)) # - 0.0020418
+
+
+# GNDVI_259 : 
+mt_sny_pheno_22_gndvi_259 <- {  
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = cbind(yld3, GNDVI_259) ~ trait ,
+         random = ~ us(trait):vm(Germplasm,  grm_inverse) + us(trait):ar1(Row):ar1(Range),
+         residual = ~ id(units):us(trait), # us resid
+         data = ny_sny_pheno_22)}
+summary(mt_sny_pheno_22_gndvi_259)$varcomp
+asreml::vpredict(mt_sny_pheno_22_gndvi_259, gen.cor ~ (V2)/sqrt(V1*V3)) # 0.05040666
+asreml::vpredict(mt_sny_pheno_22_gndvi_259, spa.cor ~ (V5)/sqrt(V4*V6)) # 0.480287
+asreml::vpredict(mt_sny_pheno_22_gndvi_259, res.cor ~ (V11)/sqrt(V10*V12)) # 0.1749894
+
+```
+
+
+
+
+## Graphs: Genetic and Spatial trend throughout the season
+```{r Mt models graphs GNDVI Snyder 2022 05122026}
+mt_models_gndvi_sny_22 <- read.csv("2022/MSI_data/output_files/MT_models_GC_SC_values_GNDVI_Snyder_2022.csv")
+colnames(mt_models_gndvi_sny_22)
+# Use your dataframe
+df_gndvi_sny_22 <- mt_models_gndvi_sny_22
+# Preserve order of Trait
+df_gndvi_sny_22$Trait <- factor(df_gndvi_sny_22$Trait, levels = df_gndvi_sny_22$Trait)
+
+# ---- Graph 1: Genetic1 only ----
+df_gndvi_sny_22_no_spa <- df_gndvi_sny_22 %>%
+  select(Trait, Genetic) %>%
+  pivot_longer(-Trait, names_to = "Component", values_to = "Value")
+
+gndvi_sny_22_p1 <- ggplot(df_gndvi_sny_22_no_spa, aes(x = Trait, y = Value, color = Component, group = Component)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "Bivariate GNDVI without Spatial  Snyder 2022",
+       y = "Correlation")
+gndvi_sny_22_p1
+# ---- Graph 2: Genetic, & Spatial  ----
+df_gndvi_sny_22_spa <- df_gndvi_sny_22 %>%
+  select(Trait, Genetic, Spatial) %>%
+  pivot_longer(-Trait, names_to = "Component", values_to = "Value") %>%
+  filter(!is.na(Value))
+
+gndvi_sny_22_p2 <- ggplot(df_gndvi_sny_22_spa, aes(x = Trait, y = Value, color = Component, group = Component)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Genetic" = "forestgreen", 
+                                "Spatial" = "darkorange")) +
+  scale_linetype_manual(values = c("Genetic" = "solid", 
+                                   "Spatial" = "solid")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "GNDVI Trend over Snyder 2022",
+       y = "Correlation")
+
+# Show both plots
+gndvi_sny_22_p1 # only genetic
+gndvi_sny_22_p2 # genetic and spatial
+
+# ggsave
+ggsave("2022/output_images/Genetic_Spatial_Correlations_NY_Snyder_2022.png", gndvi_sny_22_p2, width = 8, height = 6, dpi = 400)
+```
+
+
+
+
+ 
+ 

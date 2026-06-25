@@ -1,0 +1,582 @@
+---
+title: "Running univariate models to calculate Heritability_ASReml"
+author: "Dinesh Ghimire"
+date: "2025-06-18"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,etc..) particularly helpful. I'd be familiar with those before using this script
+# List of required packages
+required_packages <- c("dplyr", "tidyr", "ggplot2", "reshape2","data.table", "viridis","grid", "gridExtra", "GGally")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NMSU"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NMSU 
+#below is what I get when I call getwd. Just check to make sure that the root for this script is the base of the github project, sometimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa_NMSU"
+getwd() # this gets frustating sometimes. I copied another script file eg. heritability in the script folder, rename it and change script inside.
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If something is misssing please let me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NMSU cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+
+
+
+################################# Normal Irrigation Treatment ################################
+
+
+
+1. *First treatment NMSU_Normal 2022 *
+
+*Normal irrigation treatment*
+Loading and preparing data files
+```{r loading files 06182025}
+#import merged phenotype file 
+nmsu22_nor_pheno <- read.csv("2022/MSI_data/Output_files/nmsu22_nor_combined_phenotypes_MSI.csv", sep = ",") %>% 
+  select(-X) # remove index column
+
+# Before running models, make sure the variables are in correct form. Need to convert into factors and numeric if needed.
+  # converting all factorial variables into factor
+nmsu22_nor_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(nmsu22_nor_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+
+
+colnames(nmsu22_nor_pheno)
+```
+
+
+```{r make cor matrix without exporting}
+# Identify column groups
+ndvi_cols <- grep("^NDVI_", colnames(nmsu22_nor_pheno), value = TRUE)
+gndvi_cols <- grep("^GNDVI_", colnames(nmsu22_nor_pheno), value = TRUE)
+ndre_cols  <- grep("^NDRE_", colnames(nmsu22_nor_pheno), value = TRUE)
+yield_cols <- paste0("yld", 1:6)
+
+# Function: Calculate correlations only (no exporting)
+get_cor_matrix <- function(data, cols1, cols2) {
+  sub_data <- data[, c(cols1, cols2)]
+  cor(sub_data, use = "pairwise.complete.obs")
+}
+
+# Calculate
+ndvi_cor <- get_cor_matrix(nmsu22_nor_pheno, ndvi_cols, yield_cols)
+gndvi_cor <- get_cor_matrix(nmsu22_nor_pheno, gndvi_cols, yield_cols)
+ndre_cor <- get_cor_matrix(nmsu22_nor_pheno, ndre_cols, yield_cols)
+
+#View(ndre_cor)
+write.csv(gndvi_cor, file = "2022/MSI_data/output_files/Pheno_Correlation_GNDVI_Harvests_NMSU_NOR_22.csv")
+```
+
+- deleted normal heatmaps code and updated with below
+Kelly suggested to put each harvest at the end of each window and separate out each harvest window visually. 
+For that need to :
+- reorder time points and yield i.e. columns
+- create new matrix based on that reordering
+- make window and plot the heatmaps.
+```{r Pheno HeatMaps Correlation VI's and Yield}
+# Goal here: Place each harvest (yield) at the end of its respective window and visually separate windows in heatmaps.
+
+# Step 1. Define time points and yield column order for all three indices
+
+new_col_order <- c(
+  "62", "76", "90", "96", "104", "110", "114", "yld1", # window 1 which is upto yield 1
+  "124", "130", "138", "144", "150", "yld2", # window 2 and so on below...
+  "160", "166", "174", "180", "yld3",
+  "188", "194", "200", "206", "yld4",
+  "216", "222", "228", "236", "240", "yld5",
+  "250", "256", "264", "270", "278", "284", "292", "yld6"
+)
+
+# create full column names for each index (NDRE, GNDVI, NDVI)
+ndre_col_order <- paste0("NDRE_", new_col_order[!grepl("yld", new_col_order)])
+gndvi_col_order <- paste0("GNDVI_", new_col_order[!grepl("yld", new_col_order)])
+ndvi_col_order  <- paste0("NDVI_", new_col_order[!grepl("yld", new_col_order)])
+
+# Now insert each yield back at the correct spot after each VI window
+full_ndre_order  <- c(ndre_col_order[1:7], "yld1",
+                      ndre_col_order[8:12], "yld2",
+                      ndre_col_order[13:16], "yld3",
+                      ndre_col_order[17:20], "yld4",
+                      ndre_col_order[21:25], "yld5",
+                      ndre_col_order[26:32], "yld6")
+
+full_gndvi_order <- gsub("NDRE_", "GNDVI_", full_ndre_order)
+full_ndvi_order  <- gsub("NDRE_", "NDVI_", full_ndre_order)
+
+
+
+# Step 2: Define Window Boundaries (For Box Outlines)
+# Index positions for harvest windows
+window_bounds <- list(
+  window1 = c(1, 8), # within each window count number of flights and place. Heatmap made above helped to count this. 
+  window2 = c(9, 14),
+  window3 = c(15, 19),
+  window4 = c(20, 24),
+  window5 = c(25, 30),
+  window6 = c(31, 38) # make sure everything is right here. otherwise we can see in heatmap later on too.
+)
+
+
+# Step 3: Lets make a function to Plot Heatmap with Harvest Window Boxes + Dividing Lines
+
+plot_heatmap_with_boxes_and_lines <- function(cor_matrix, order_vec, title_text) {
+  library(reshape2)
+  library(ggplot2)
+  
+  # Reorder the correlation matrxi acc to tnew column order.
+  cor_matrix_ordered <- cor_matrix[order_vec, order_vec]
+  
+  # Melt i.e. convert to long format
+  cor_long <- reshape2::melt(cor_matrix_ordered)
+  
+  # Positions for separating lines after each yield
+  line_positions <- c(8, 14, 19, 24, 30, 38)
+  
+  # Base heatmap
+  p <- ggplot(cor_long, aes(x = Var1, y = Var2, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1, 1)) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+      axis.text.y = element_text(size = 8)
+    ) +
+    labs(title = title_text, x = "Traits", y = "Traits")
+  
+  # Add window boxes
+  for (bounds in window_bounds) {
+    start <- bounds[1]
+    end <- bounds[2]
+    p <- p + geom_rect(
+      xmin = start - 0.5, xmax = end + 0.5,
+      ymin = start - 0.5, ymax = end + 0.5,
+      color = "black", fill = NA, linewidth = 0.8
+    )
+  }
+  
+  # Add separating lines after each harvest yield- dashed line.. its getting overcrowded with colors so removing this now
+  # for (pos in line_positions) {
+   # p <- p +
+     # geom_hline(yintercept = pos + 0.5, color = "yellow", linetype = "dashed", size = 1)
+  # }
+  
+  return(p)
+}
+
+
+# NDVI heatmap
+ndvi_heatmap_nor_22 <- plot_heatmap_with_boxes_and_lines(ndvi_cor, full_ndvi_order, "NDVI vs Yield Correlation Heatmap with Harvest Windows")
+print(ndvi_heatmap_nor_22)
+
+# GNDVI heatmap
+gndvi_heatmap_nor_22 <- plot_heatmap_with_boxes_and_lines(gndvi_cor, full_gndvi_order, "GNDVI vs Yield Correlation Heatmap with Harvest Windows")
+print(gndvi_heatmap_nor_22)
+
+# NDRE heatmap
+ndre_heatmap_nor_22 <- plot_heatmap_with_boxes_and_lines(ndre_cor, full_ndre_order, "NDRE vs Yield Correlation Heatmap with Harvest Windows")
+print(ndre_heatmap_nor_22)
+
+# saving these
+# save the file
+ggsave(filename = "Pheno_Cor_NDVI_Heatmap_nmsu_nor_2022.png", plot = ndvi_heatmap_nor_22, path = "2022/output_images", width = 15, height = 12,dpi = 400) # for ndvi
+# now for gndvi and ndre
+ggsave(filename = "Pheno_Cor_GNDVI_Heatmap_nmsu_nor_2022.png", plot = gndvi_heatmap_nor_22, path = "2022/output_images", width = 15, height = 12,dpi = 400)
+ggsave(filename = "Pheno_Cor_NDRE_Heatmap_nmsu_nor_2022.png", plot = ndre_heatmap_nor_22, path = "2022/output_images", width = 15, height = 12,dpi = 400)
+
+```
+
+
+
+
+Here: For each harvest window (1 to 6):
+- Reorder columns so that its easier to separate out window (like we did above but was inside function so need to do it here too)
+- It pulls all VI timepoints for that window (from the correlation matrix rows).
+- It pulls the single corresponding yield column for that window (from the correlation matrix columns).
+- For that VI × Yield subset: It takes the correlation values (all VI rows vs that yield column) and computes their mean.
+
+Biologically we are asking: "What is the average correlation between all VIs in this window and the corresponding yield for this cutting?"
+
+Note: use correct correlation matrix and double check because otherwise we we will be correlating with wrong trait. 
+```{r Mean Pheno Correlation  of VI's with Yield by harvest window}
+# we still need COR matrix from above chunks for each Vi. 
+# then neeed to reorder.
+ndre_cor_reordered  <- ndre_cor[full_ndre_order, full_ndre_order]
+# View(ndre_cor_reordered)
+gndvi_cor_reordered <- gndvi_cor[full_gndvi_order, full_gndvi_order]
+ndvi_cor_reordered  <- ndvi_cor[full_ndvi_order, full_ndvi_order]
+
+
+# Index positions for harvest windows
+window_bounds <- list( ### VERY CRITICAL TO SELECT THIS WINDOW becz it determines where we are pulling from
+  window1 = c(1, 8),
+  window2 = c(9, 14),
+  window3 = c(15, 19),
+  window4 = c(20, 24),
+  window5 = c(25, 30),
+  window6 = c(31, 38)
+)
+
+# Function to compute windoww ise mean correlation for a VI type
+get_window_means <- function(cor_matrix, vi_order) {
+  results <- data.frame()
+  
+  for (w in 1:length(window_bounds)) {
+    bounds <- window_bounds[[w]] # Get start and end positions like 1 to 8 in window 1 (row/column positions for this window)
+    vi_indices <- bounds[1]:(bounds[2]-1)  # this is position of VI time points i.e. VI columns (exclude the yield position) eg. 1 to 7 NDVI. Thus, this line selects the columns corresponding to vegetation indices (VIs) — from the start index up to one less than the yield column index. For example, columns 1 to 7 for window 1, which are the NDVI time points. 
+    yld_index <- bounds[2]  #now position of corresponding yield column (yld1, yld2, ...) eg. 8th col which is yld 1. this line points to the yield column for that window (e.g., column 8 for window 1, which corresponds to yld1).
+     
+    # For each VI column in this window, get correlation with yield
+    cor_vals <- cor_matrix[vi_indices, yld_index]
+    
+    # Store mean correlation
+    results <- rbind(results, data.frame(
+      Window = paste0("Window_", w),
+      Mean_Correlation = mean(cor_vals, na.rm = TRUE)
+    ))
+  }
+  
+  return(results)
+}
+# now run this function for each VI
+gndvi_window_means <- get_window_means(gndvi_cor_reordered, full_gndvi_order)
+ndvi_window_means  <- get_window_means(ndvi_cor_reordered, full_ndvi_order)
+ndre_window_means  <- get_window_means(ndre_cor_reordered, full_ndre_order)
+
+# Add VI type column
+gndvi_window_means$VI <- "GNDVI"
+ndvi_window_means$VI <- "NDVI"
+ndre_window_means$VI <- "NDRE"
+
+# Combine
+combined_means_nor_22 <- rbind(gndvi_window_means, ndvi_window_means, ndre_window_means)
+#View(combined_means_nor_22)
+# finally ggplot with a line
+lineplot_nor_22 <- ggplot(combined_means_nor_22, aes(x = VI, y = Mean_Correlation, group = Window, color = Window)) +
+  geom_line(aes(linetype = Window), size = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(
+    title = "Pheno Cor. of VI's with Yield by Window at NMSU 2022 Normal",
+    x = "Vegetation Index Type",
+    y = "Mean Correlation with Yield"
+  ) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_y_continuous(limits = c(0, 0.8)) +   # for y axis limit
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+lineplot_nor_22
+
+# testing
+window_bounds
+print(ndre_cor_reordered[1:7, 8]) # to check for window 1.. because 1:7 is row 1 to 7 in cor matrix of ndre View(ndre_cor) and 8 = column
+mean(ndre_cor_reordered[1:7, 8], na.rm = TRUE)
+mean(ndvi_cor_reordered[1:7, 8], na.rm = TRUE)
+mean(gndvi_cor_reordered[1:7, 8], na.rm = TRUE)
+ # these values are similar to what i see in the graph, so looks good. 
+ # also tested manually by calculating cor between each NDVI for window 1 with yld 1. then took mean of that, came around 0.50 which is closer to what we see here
+ggsave(filename = "Pheno_Cor_Mean_VI_LinePlot_nmsu_nor_2022.png", plot = lineplot_nor_22, path = "2022/output_images", width = 6, height = 5,dpi = 400)
+
+```
+
+
+
+
+
+
+################################# Early Termination ################################
+
+
+
+
+
+
+2. *First treatment NMSU_Early_Termination 2022 *
+with spatial in the model, random = ~ vm(Germplasm, aa_geno_inverse) + ar1(Row):ar1(Range),
+
+
+
+*Early_Termination irrigation treatment*
+Loading and preparing data files
+```{r loading files 06272025}
+#import merged phenotype file 
+nmsu22_et_pheno <- read.csv("2022/MSI_data/Output_files/nmsu22_et_combined_phenotypes_MSI.csv", sep = ",") %>% 
+  select(-X) # remove index column
+
+# Before running models, make sure the variables are in correct form. Need to convert into factors and numeric if needed.
+  # converting all factorial variables into factor
+nmsu22_et_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(nmsu22_et_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+  ## make sure all variables are in correct form (factors or numeric)
+
+```
+
+
+
+```{r make cor matrix }
+# Identify column groups
+ndvi_cols_et <- grep("^NDVI_", colnames(nmsu22_et_pheno), value = TRUE)
+gndvi_cols_et <- grep("^GNDVI_", colnames(nmsu22_et_pheno), value = TRUE)
+ndre_cols_et  <- grep("^NDRE_", colnames(nmsu22_et_pheno), value = TRUE)
+yield_cols_et <- paste0("yld", 1:5) # change no. of yields
+
+# Function: Calculate correlations only (no exporting)
+get_cor_matrix_et <- function(data, cols1, cols2) {
+  sub_data <- data[, c(cols1, cols2)]
+  cor(sub_data, use = "pairwise.complete.obs")
+}
+
+# Calculate
+ndvi_cor_et <- get_cor_matrix_et(nmsu22_et_pheno, ndvi_cols_et, yield_cols_et)
+gndvi_cor_et <- get_cor_matrix_et(nmsu22_et_pheno, gndvi_cols_et, yield_cols_et)
+ndre_cor_et <- get_cor_matrix_et(nmsu22_et_pheno, ndre_cols_et, yield_cols_et)
+
+# View(ndvi_cor_et)
+
+# not exporting here
+```
+
+Heatmaps
+
+
+
+
+NEED to change col order based on ET columns & harvest dates and also remove time points 
+
+not now (from termination zone- 182 to 243)
+
+
+
+```{r Pheno HeatMaps Correlation VI's and Yield}
+# Goal here: Place each harvest (yield) at the end of its respective window and visually separate windows in heatmaps.
+
+# Step 1. Define time points and yield column order for all three indices
+
+new_col_order_et <- c(
+  "62", "76", "90", "96", "104", "110", "114", "yld1", # window 1 which is upto yield 1
+  "124", "130", "138", "144", "150", "yld2", # window 2 and so on below...
+  "160", "166", "174", "180", "yld3",
+  "188", "194", "200", "206", "yld4", 
+  "216", "222", "228", "236", "240", "250", "256", "264", "270", "278", "284", "292", "yld5"
+)
+
+# create full column names for each index (NDRE, GNDVI, NDVI)
+ndre_col_order_et <- paste0("NDRE_", new_col_order_et[!grepl("yld", new_col_order_et)])
+gndvi_col_order_et <- paste0("GNDVI_", new_col_order_et[!grepl("yld", new_col_order_et)])
+ndvi_col_order_et  <- paste0("NDVI_", new_col_order_et[!grepl("yld", new_col_order_et)])
+
+# Now * insert * each yield back at the correct spot after each VI window
+full_ndre_order_et  <- c(ndre_col_order_et[1:7], "yld1", # inserting yld 1 after 7th ndre col.
+                      ndre_col_order_et[8:12], "yld2",
+                      ndre_col_order_et[13:16], "yld3",
+                      ndre_col_order_et[17:20], "yld4",
+                      ndre_col_order_et[21:32], "yld5")
+
+full_gndvi_order_et <- gsub("NDRE_", "GNDVI_", full_ndre_order_et)
+full_ndvi_order_et  <- gsub("NDRE_", "NDVI_", full_ndre_order_et)
+
+
+
+# Step 2: Define Window Boundaries (For Box Outlines)
+# Index positions for harvest windows
+window_bounds_et <- list(
+  window1 = c(1, 8), # within each window count number of flights and place. count using full_ndre_order above. 
+  window2 = c(9, 14),
+  window3 = c(15, 19),
+  window4 = c(20, 24),
+  window5 = c(25, 37) # make sure everything is right here. otherwise we can see in heatmap later on too. 
+)
+
+
+# Step 3: Lets make a function to Plot Heatmap with Harvest Window Boxes + Dividing Lines
+
+plot_heatmap_with_boxes_and_lines_et <- function(cor_matrix, order_vec, title_text) {
+  library(reshape2)
+  library(ggplot2)
+  
+  # Reorder the correlation matrxi acc to tnew column order.
+  cor_matrix_ordered <- cor_matrix[order_vec, order_vec]
+  
+  # Melt i.e. convert to long format
+  cor_long <- reshape2::melt(cor_matrix_ordered)
+  
+  # Positions for separating lines after each yield
+  line_positions <- c(8, 14, 19, 24, 30, 38)
+  
+  # Base heatmap
+  p <- ggplot(cor_long, aes(x = Var1, y = Var2, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1, 1)) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+      axis.text.y = element_text(size = 8)
+    ) +
+    labs(title = title_text, x = "Traits", y = "Traits")
+  
+  # Add window boxes
+  for (bounds in window_bounds_et) {
+    start <- bounds[1]
+    end <- bounds[2]
+    p <- p + geom_rect(
+      xmin = start - 0.5, xmax = end + 0.5,
+      ymin = start - 0.5, ymax = end + 0.5,
+      color = "black", fill = NA, linewidth = 0.8
+    )
+  }
+  
+  # Add separating lines after each harvest yield- dashed line.. its getting overcrowded with colors so removing this now
+  # for (pos in line_positions) {
+   # p <- p +
+     # geom_hline(yintercept = pos + 0.5, color = "yellow", linetype = "dashed", size = 1)
+  # }
+  
+  return(p)
+}
+
+
+# NDVI heatmap
+ndvi_heatmap_et_22 <- plot_heatmap_with_boxes_and_lines_et(ndvi_cor_et, full_ndvi_order_et, "NDVI & Yield Correlation by Harvest Windows for NMSU ET 2022")
+print(ndvi_heatmap_et_22)
+
+# GNDVI heatmap
+gndvi_heatmap_et_22 <- plot_heatmap_with_boxes_and_lines_et(gndvi_cor_et, full_gndvi_order_et, "GNDVI & Yield Correlation by Harvest Windows for NMSU ET 2022")
+print(gndvi_heatmap_et_22)
+
+# NDRE heatmap
+ndre_heatmap_et_22 <- plot_heatmap_with_boxes_and_lines_et(ndre_cor_et, full_ndre_order_et, "NDRE & Yield Correlation by Harvest Windows for NMSU ET 2022")
+print(ndre_heatmap_et_22)
+
+# saving these
+# save the file
+ggsave(filename = "Pheno_Cor_NDVI_Heatmap_nmsu_et_2022.png", plot = ndvi_heatmap_et_22, path = "2022/output_images", width = 15, height = 12,dpi = 400) # for ndvi
+# now for gndvi and ndre
+ggsave(filename = "Pheno_Cor_GNDVI_Heatmap_nmsu_et_2022.png", plot = gndvi_heatmap_et_22, path = "2022/output_images", width = 15, height = 12,dpi = 400)
+ggsave(filename = "Pheno_Cor_NDRE_Heatmap_nmsu_et_2022.png", plot = ndre_heatmap_et_22, path = "2022/output_images", width = 15, height = 12,dpi = 400)
+
+```
+
+
+
+
+Here: For each harvest window (1 to 6):
+- Reorder columns so that its easier to separete out window (like we did above but was inside function so need to do it here too)
+- It pulls all VI timepoints for that window (from the correlation matrix rows).
+- It pulls the single corresponding yield column for that window (from the correlation matrix columns).
+- For that VI × Yield subset: It takes the correlation values (all VI rows vs that yield column) and computes their mean.
+
+Biologically we are asking: "What is the average correlation between all VIs in this window and the corresponding yield for this cutting?"
+
+Note: use correct correlation matrix and double check because otherwise we will be correlating with wrong trait. 
+```{r}
+# we still need COR matrix from above chunks for each Vi. 
+# then neeed to reorder.
+ndre_cor_reordered_et  <- ndre_cor_et[full_ndre_order_et, full_ndre_order_et]
+# View(ndre_cor_reordered)
+gndvi_cor_reordered_et <- gndvi_cor_et[full_gndvi_order_et, full_gndvi_order_et]
+ndvi_cor_reordered_et  <- ndvi_cor_et[full_ndvi_order_et, full_ndvi_order_et]
+
+
+# Index positions for harvest windows
+window_bounds_et <- list( ### VERY CRITICAL TO SELECT THIS WINDOW becz it determines where we are pulling from
+  window1 = c(1, 8),
+  window2 = c(9, 14),
+  window3 = c(15, 19),
+  window4 = c(20, 24),
+  window5 = c(25, 37)
+)
+
+# Function to compute windoww ise mean correlation for a VI type
+get_window_means_et <- function(cor_matrix, vi_order) {
+  results <- data.frame()
+  
+  for (w in 1:length(window_bounds_et)) {
+    bounds <- window_bounds_et[[w]] # Get start and end positions like 1 to 8 in window 1 (row/column positions for this window)
+    vi_indices <- bounds[1]:(bounds[2]-1)  # this is position of VI time points i.e. VI columns (exclude the yield position) eg. 1 to 7 NDVI. Thus, this line selects the columns corresponding to vegetation indices (VIs) — from the start index up to one less than the yield column index. For example, columns 1 to 7 for window 1, which are the NDVI time points. 
+    yld_index <- bounds[2]  #now position of corresponding yield column (yld1, yld2, ...) eg. 8th col which is yld 1. this line points to the yield column for that window (e.g., column 8 for window 1, which corresponds to yld1).
+     
+    # For each VI column in this window, get correlation with yield
+    cor_vals <- cor_matrix[vi_indices, yld_index]
+    
+    # Store mean correlation
+    results <- rbind(results, data.frame(
+      Window = paste0("Window_", w),
+      Mean_Correlation = mean(cor_vals, na.rm = TRUE)
+    ))
+  }
+  
+  return(results)
+}
+# now run this function for each VI
+gndvi_window_means_et <- get_window_means_et(gndvi_cor_reordered_et, full_gndvi_order_et)
+ndvi_window_means_et  <- get_window_means_et(ndvi_cor_reordered_et, full_ndvi_order_et)
+ndre_window_means_et  <- get_window_means_et(ndre_cor_reordered_et, full_ndre_order_et)
+
+# Add VI type column
+gndvi_window_means_et$VI <- "GNDVI"
+ndvi_window_means_et$VI <- "NDVI"
+ndre_window_means_et$VI <- "NDRE"
+
+# Combine
+combined_means_et_22 <- rbind(gndvi_window_means_et, ndvi_window_means_et, ndre_window_means_et)
+#View(combined_means_et_22)
+# finally ggplot with a line
+lineplot_et_22 <- ggplot(combined_means_et_22, aes(x = VI, y = Mean_Correlation, group = Window, color = Window)) +
+  geom_line(aes(linetype = Window), linewidth = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(
+    title = "Pheno Cor. of VI's with Yield by Window at NMSU ET 2022",
+    x = "Vegetation Index Type",
+    y = "Mean Correlation with Yield"
+  ) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_y_continuous(limits = c(-1, 1)) +   # for y axis limit
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+lineplot_et_22
+
+# testing
+window_bounds_et
+print(ndre_cor_reordered_et[1:7, 8]) # to check for window 1.. because 1:7 is row 1 to 7 in cor matrix of ndre View(ndre_cor) and 8 = column
+mean(ndre_cor_reordered_et[1:7, 8], na.rm = TRUE)
+mean(ndvi_cor_reordered_et[1:7, 8], na.rm = TRUE)
+mean(gndvi_cor_reordered_et[1:7, 8], na.rm = TRUE)
+ # these values are similar to what i see in the graph, so looks good. 
+ # also tested manually by calculating cor between each NDVI for window 1 with yld 1. then took mean of that, came around 0.50 which is closer to what we see here
+ggsave(filename = "Pheno_Cor_Mean_VI_LinePlot_nmsu_et_2022.png", plot = lineplot_et_22, path = "2022/output_images", width = 6, height = 5,dpi = 400)
+
+```
+Due to termination time points, window 4 has negative mean for NDVI as well and window 5 is also affected.
+
+ 

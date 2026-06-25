@@ -1,0 +1,1155 @@
+---
+title: "Running univariate models to calculate Heritability_ASReml"
+author: "Dinesh Ghimire"
+date: "2025-08-01"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,etc..) particularly helpful. I'd be familiar with those before using this script
+# List of required packages
+required_packages <- c("dplyr","asreml", "tidyr", "ggplot2", "reshape2","data.table", "viridis","grid", "gridExtra", "GGally")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NMSU"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NMSU 
+#below is what I get when I call getwd. Just check to make sure that the root for this script is the base of the github project, sometimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa_NMSU"
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If something is misssing please let me know. 
+key<-read.csv("2023/meta_data/cultivar_list_key.csv") # contains both CU and NMSU cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+
+
+
+1. *First treatment NMSU_Normal 2023 *
+with spatial in the model, random = ~ vm(Material_Id, ct_geno_inverse) + ar1(Row):ar1(Range),
+
+
+
+*Normal irrigation treatment*
+Loading and preparing data files
+```{r loading files 08012025}
+#import merged phenotype file 
+nmsu23_nor_pheno <- read.csv("2023/MSI_data/Output_files/nmsu23_nor_combined_phenotypes_MSI.csv", sep = ",") %>% 
+  dplyr::select(-X) # remove index column
+
+# Before running models, make sure the variables are in correct form. Need to convert into factors and numeric if needed.
+  # converting all factorial variables into factor
+nmsu23_nor_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(nmsu23_nor_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+
+
+
+#import genotype file (same for 2022 and 2023)
+grm_aa <- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1)
+grm_aa <- as.matrix(grm_aa)
+mean(diag(grm_aa)) # 1
+hist(diag(grm_aa))
+
+grm_agh <- grm_aa+diag(.0005,length(grm_aa[,1]),length(grm_aa[,1])) # adding 0.05 nugget/ridge to ensure matrix is strictly positive definite
+grm_inverse <- solve(grm_agh)
+
+#now run the model for now without GRM but need to find GRM.
+
+```
+
+
+
+Normally if the range of numbers vary a lot between vi's and yield, then we can scale yield to variance level of vi's. but here since yield is in lb and upto 2 digit, should have that issue. If got any, we can always use scaled yield.
+```{r scaling yield }
+# we only have to scale 6 harvest values based on NDVI's value. Of course the variance between VI's differ but it should be okay to use Yield scaled onto NDVI for analysis with NDRE and GNDVI as well. 
+
+# Define the mapping of yield traits to NDVI columns
+yield_traits <- paste0("yld", 2:7)
+ndvi_times <- c("NDVI_145", "NDVI_165", "NDVI_201", "NDVI_228", "NDVI_270", "NDVI_299") # selecting one of the time point in each harvest window. selecting based on higher variation time point from heatmap, not actually calculating all. FOR this check the harvest windows or pheno cor heatmaps to see which time point falls in which window
+
+# Loop over each yield trait
+for (i in 1:length(yield_traits)) {
+  
+  trait <- yield_traits[i]
+  ndvi_col <- ndvi_times[i]
+  
+  # Calculate variance of NDVI and yield
+  ndvi_var <- var(nmsu23_nor_pheno[[ndvi_col]], na.rm = TRUE)
+  yld_var <- var(nmsu23_nor_pheno[[trait]], na.rm = TRUE)
+  
+  # Calculate scaling factor
+  sf <- sqrt(ndvi_var) / sqrt(yld_var)
+  
+  # Create new scaled yield column
+  new_col <- paste0("sca_", trait)
+  nmsu23_nor_pheno[[new_col]] <- nmsu23_nor_pheno[[trait]] * sf
+  
+  #  Print scaling factor
+  cat("Scaling factor for", trait, "using", ndvi_col, ":", sf, "\n")
+}
+
+
+# thus all scaled yields are added as a new column at last. 
+```
+
+one but not confirming now
+```{r for checking outliers GZA_F}
+# Fit a linear model
+model <- lm(yld2 ~ Rep, data = nmsu23_nor_pheno, na.action = na.exclude)
+
+# Calculate residuals
+nmsu23_nor_pheno$residuals <- residuals(model, na.action = na.exclude)
+# Standardize the residuals
+nmsu23_nor_pheno$residuals_standard <- scale(nmsu23_nor_pheno$residuals, center = T, scale = T) 
+# Identify outliers
+outliers <- nmsu23_nor_pheno %>% filter(abs(residuals_standard) > 3)
+# Print outliers
+View(outliers)
+# three in the range of 3.5, so not removing for now.
+
+```
+
+
+Before running models, I will be keeping only the imaging events that overlap with available yield data i.e. remove time points before 1st harvest cz we don't have data on that. And for multi-trait models later on, I will need harvest data to correspond to. Thus remove imaging events 73.. 117. starting from 131.
+
+```{r run univariate models with spatial 08152025}
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+colnames(nmsu23_nor_pheno)
+# first for NDVI
+# we have 32 imaging events 
+# Days: 73, 88, 95, 101, 107, 117, 131, 138, 145, 152, 160, 161, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307
+# filtered days: 32-6 = 26 h2.
+#131, 138, 145, 152, 160, 161, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307
+
+#  For NDVI_152
+st_nmsu23_nor_152 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_152 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_152)$varcomp
+asreml::vpredict(st_nmsu23_nor_152, heritA ~ V1 / (V1 + V5)) # 0.80
+
+
+# run for all time points
+```
+
+
+ The fact that h2 > H2 here isn’t an error — it’s just that the models are not nested, so the two are capturing variance differently.
+
+```{r Heritability of yield (Narrow Sense as we don't have GRM) date}
+
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+
+# for yield 2
+ # asreml.options(extra=1000,maxit =1000) # to setup more iterations for successful burn-in or convergence
+
+st_nmsu23_nor_yld2 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_yld2)$varcomp
+asreml::vpredict(st_nmsu23_nor_yld2, heritA ~ V1 / (V1 + V5)) # 0.58 with 0.11 SE
+# slightly higher than broad sense (without GRM): but that's possible bcz of how we are calculating narrow sense heritability. it's not nested within broad sense here. 
+# in this case, looking at var comp, additive genetic component pulled some component of spatial when using GRM. 
+st_nmsu23_nor_yld2_no_grm <- { 
+  asreml(fixed = yld2 ~ 1 + Rep, #rep effect as fixed
+         random = ~ id(Germplasm) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_yld2_no_grm)$varcomp
+asreml::vpredict(st_nmsu23_nor_yld2_no_grm, heritA ~ V1 / (V1 + V5)) #0.56
+
+
+# for yield 3
+st_nmsu23_nor_yld3 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_yld3)$varcomp
+asreml::vpredict(st_nmsu23_nor_yld3, heritA ~ V1 / (V1 + V5)) # 0.70 with 0.086 SE
+
+
+# for yield 4
+st_nmsu23_nor_yld4 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld4 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_yld4)$varcomp
+asreml::vpredict(st_nmsu23_nor_yld4, heritA ~ V1 / (V1 + V5)) # 0.68 with 0.089 SE
+
+
+# for yield 5
+st_nmsu23_nor_yld5 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld5 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_yld5)$varcomp
+asreml::vpredict(st_nmsu23_nor_yld5, heritA ~ V1 / (V1 + V5)) # 0.69 with 0.09 SE
+
+
+# for yield 6
+st_nmsu23_nor_yld6 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld6 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_yld6)$varcomp
+asreml::vpredict(st_nmsu23_nor_yld6, heritA ~ V1 / (V1 + V5)) # 0.66 with 0.09 SE
+
+
+# for yield 7
+st_nmsu23_nor_yld7 <- { 
+    attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld7 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_yld7)$varcomp
+asreml::vpredict(st_nmsu23_nor_yld7, heritA ~ V1 / (V1 + V5)) # 0.74 with 0.075 SE
+
+```
+
+
+# Run for all VI's
+### STORE BOTH HERITABILITY AND VARIANCE COMPONENTS
+
+ To check variance components as well: store VC in another data frame
+ # Days: 131, 138, 145, 152, 160, 161, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307 (CZ REMOVED TIME POINTS BEFORE 1st harvest)
+
+
+### For modeling, check experimental design first, Rep>Range>Row here
+```{r For all VI's 08012025}
+# Define time points
+times <- c(131, 138, 145, 152, 160, 161, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307)
+
+# Initialize heritability results
+herit_results_nor_23 <- data.frame(
+  Time = times,
+  Herit_ndvi = NA, Herit_ndvi_spa = NA,
+  Herit_gndvi = NA, Herit_gndvi_spa = NA,
+  Herit_ndre = NA, Herit_ndre_spa = NA
+)
+
+# Initialize variance component storage
+varcomp_results <- data.frame(
+  Time = numeric(0),
+  Index = character(0),
+  Model = character(0),
+  Component = character(0),
+  Estimate = numeric(0),
+  stringsAsFactors = FALSE
+)
+
+# Function to fit model and return heritability and variance components
+fit_heritability <- function(index_prefix, time_point, data) {
+  col_name <- paste0(index_prefix, "_", time_point)
+  
+  if (!col_name %in% colnames(data)) {
+    warning(paste("Column", col_name, "not found. Skipping."))
+    return(list(h2 = c(NA, NA), vc = NULL))
+  }
+  
+  # --- Simple Model ---
+  mod_simple <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE # add grm here
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 + Rep")),
+           random = ~ vm(Germplasm, grm_inverse),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Simple model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_simple <- NA
+  vc_simple <- NULL
+  if (!is.null(mod_simple)) {
+    h2_simple <- tryCatch({
+      vpredict(mod_simple, herit ~ V1 / (V1 + V2))$Estimate
+    }, error = function(e) NA)
+    
+    vc_simple <- tryCatch({
+      vc <- summary(mod_simple)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Simple")
+    }, error = function(e) NULL)
+  }
+  
+  # --- Spatial Model --- 
+  mod_spatial <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE # add grm here
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 + Rep")),
+           random = ~ vm(Germplasm, grm_inverse) + ar1(Range):ar1(Row),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Spatial model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_spatial <- NA
+  vc_spatial <- NULL
+  if (!is.null(mod_spatial)) {
+    h2_spatial <- tryCatch({
+      vpredict(mod_spatial, herit_spatial ~ V1 / (V1 + V5))$Estimate
+    }, error = function(e) NA)
+    
+    vc_spatial <- tryCatch({
+      vc <- summary(mod_spatial)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Spatial")
+    }, error = function(e) NULL)
+  }
+
+  return(list(h2 = c(h2_simple, h2_spatial),
+              vc = rbind(vc_simple, vc_spatial)))
+}
+
+# Loop through all time points and indices
+for (i in seq_along(times)) {
+  time <- times[i]
+  cat("\nProcessing time point:", time, "\n")
+  
+  for (index in c("NDVI", "GNDVI", "NDRE")) {
+    result <- fit_heritability(index, time, nmsu23_nor_pheno)
+    
+    # Store heritabilities
+    herit_results_nor_23[i, paste0("Herit_", tolower(index))] <- result$h2[1]
+    herit_results_nor_23[i, paste0("Herit_", tolower(index), "_spa")] <- result$h2[2]
+    
+    # Store variance components
+    if (!is.null(result$vc)) {
+      result$vc$Index <- index
+      result$vc$Time <- time
+      varcomp_results <- bind_rows(varcomp_results, result$vc)
+    }
+  }
+}
+
+# Round heritability results to 2 decimals
+herit_results_nor_23 <- herit_results_nor_23 %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+# Done!
+print(head(herit_results_nor_23))
+print(head(varcomp_results))
+
+
+```
+
+Checking some NA's or very high heritabilities (eg. 0.87 in GNDVI 215 but 0 in NDVI, also 1 herit of ndvi 223) or suspiciously differnet estimate among VI's to make sure the realibility of the estimates.
+
+```{r}
+# PART 1: First lets deal with NA's :for those that didn't run
+# NDVI: 283: 0.11 with row only
+# 1. for 283 NDVI with spatial, its NA on Herit with spatial
+st_nmsu23_nor_ndvi_283 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_283 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_ndvi_283)$varcomp
+asreml::vpredict(st_nmsu23_nor_ndvi_283, heritA ~ V3 / (V3 + V4)) # Row: 0.11 with 0.11 SE (bound with range)
+  
+
+# GNDVI: 131: set to 0 and then remove 113 for all three
+# 1. for 131 GNDVI with spatial, its NA on Herit with spatial
+st_nmsu23_nor_131_gndvi <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_131 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_131_gndvi)$varcomp
+asreml::vpredict(st_nmsu23_nor_ndvi_283, heritA ~ V3 / (V3 + V4)) # almost 0 cz bound
+
+# NDRE: 283- set to 0
+st_nmsu23_nor_283_ndre <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_283 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_283_ndre)$varcomp
+asreml::vpredict(st_nmsu23_nor_283_ndre, heritA ~ V3 / (V3 + V4)) # Row: 0.028 with 0.09 SE (almost 0)
+asreml::vpredict(st_nmsu23_nor_161_gndvi, heritA ~ V3 / (V3 + V4)) # Range: ~ 0 and bound for genetic and spatial
+
+
+# PART 2: too high values
+ # NDVI: 187 and 192 (too low than other two), 223 (1 heritability)
+  ## NDVI 187: all looks good, still got smaller value, 0.15
+st_nmsu23_nor_ndvi_187 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_187 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_ndvi_187)$varcomp
+asreml::vpredict(st_nmsu23_nor_ndvi_187, heritA ~ V1 / (V1 + V5)) #  0.15 
+
+  ## NDVI 192: its 0 (all good), with both full model and sparse (either row or range)
+st_nmsu23_nor_ndvi_192 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_192 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_ndvi_192)$varcomp
+asreml::vpredict(st_nmsu23_nor_ndvi_192, heritA ~ V1 / (V1 + V5)) #  0.15 
+
+  ## NDVI 223: change to 0.47 with row
+st_nmsu23_nor_ndvi_223 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_223 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_ndvi_223)$varcomp
+asreml::vpredict(st_nmsu23_nor_ndvi_223, heritA ~ V3 / (V3 + V4)) #  0.47 with row... bound with both so 1 
+
+
+ # GNDVI: 187(much than ndvi), 206 (too low than other two), 215 (much higher than other two), 257 (much higher than other two),  283 (other two indices have almost 0 heritability), 
+
+## GNDVI 187:all looks good: still got higher value, 0.82 and everything looks good. genetic v.c. higher than ndvi
+st_nmsu23_nor_gndvi_187 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_187 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_gndvi_187)$varcomp
+asreml::vpredict(st_nmsu23_nor_gndvi_187, heritA ~ V1 / (V1 + V5)) #  0.15 
+
+  ## GNDVI 206: replace with 0.60 (Row)
+    ## still 0.31 (smaller than ndvi and ndre), but bound for spatial. so only did with row and got 0.60 (looks good too)
+st_nmsu23_nor_gndvi_206 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_206 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_gndvi_206)$varcomp
+asreml::vpredict(st_nmsu23_nor_gndvi_206, heritA ~ V3 / (V3 + V4)) #  0.60 with row and 0.30 with range
+
+  ## GNDVI 215: all looks good
+st_nmsu23_nor_gndvi_215 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_215 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_gndvi_215)$varcomp
+asreml::vpredict(st_nmsu23_nor_gndvi_215, heritA ~ V1 / (V1 + V5)) #  0.87 (all looks good)
+
+  ## GNDVI 257: all good
+st_nmsu23_nor_gndvi_257 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_257 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_gndvi_257)$varcomp
+asreml::vpredict(st_nmsu23_nor_gndvi_257, heritA ~ V1 / (V1 + V5)) #  0.83 (all looks good)
+
+  ## GNDVI 283: false, bound with full model, h2 = 0.1, lets set up as 0 and remove this
+st_nmsu23_nor_gndvi_283 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_283 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_nor_pheno)}
+summary(st_nmsu23_nor_gndvi_283)$varcomp
+asreml::vpredict(st_nmsu23_nor_gndvi_283, heritA ~ V3 / (V3 + V4)) #  0.09 with row 
+
+
+
+# now lets fill in this vacant NA in the dataframe with the value we calculated here
+# four values to add: 223 (0.47), 283(0.11) NDVI with spatial, 131(0), 206(0.6) & 283(0) GNDVI with spatial, 283(0.1) NDRE with spatial
+
+  #  add row or range based spatial values in the dataframe
+# NDVI_223 — use Row-based model (h2 = 0.46)
+herit_results_nor_23$Herit_ndvi_spa[herit_results_nor_23$Time == 223] <- 0.46
+
+# NDVI_283 — use Row-based model (h2 = 0.13)
+herit_results_nor_23$Herit_ndvi_spa[herit_results_nor_23$Time == 283] <- 0.13
+
+# GNDVI_131 —  (h2 = 0)
+herit_results_nor_23$Herit_gndvi_spa[herit_results_nor_23$Time == 131] <- 0
+
+# GNDVI_206 — use Row-based model (h2 = 0.6)
+herit_results_nor_23$Herit_gndvi_spa[herit_results_nor_23$Time == 206] <- 0.6
+
+# GNDVI_283 — (h2 = 0)
+herit_results_nor_23$Herit_gndvi_spa[herit_results_nor_23$Time == 283] <- 0
+
+# NDRE_283 — use Row-based model (h2 = 0.1)
+herit_results_nor_23$Herit_ndre_spa[herit_results_nor_23$Time == 283] <- 0.1
+
+
+# part 3: remove time points with all ~ 0 heritability ( all <0.1)
+# 131, 161, 270, 283
+
+# now remove time points
+head(herit_results_nor_23)
+dim(herit_results_nor_23) # 26*7
+bad_times <- c(131,161, 270, 283)
+herit_results_nor_23_clean <- herit_results_nor_23[!herit_results_nor_23$Time %in% bad_times, ]
+dim(herit_results_nor_23_clean) # 22*7, thus 4 time points removed
+
+
+# manually checked and all values are in right place, now lets export this file for future use. 
+
+write.csv(herit_results_nor_23_clean, file = "2023/MSI_data/output_files/Heritabilities_MSI_filtered_aa_nor_23.csv", row.names = F)
+```
+
+
+
+Comparison box plots
+
+```{r}
+
+herit_results_filtered_nor_23 <- read.csv("2023/MSI_data/output_files/Heritabilities_MSI_filtered_aa_nor_23.csv", sep = ",") 
+
+
+# Reshape all six heritability columns to long format
+herit_results_filtered_nor_23_long_all <- herit_results_filtered_nor_23 %>%
+  dplyr::select(Time, Herit_ndvi, Herit_ndvi_spa,
+               Herit_gndvi, Herit_gndvi_spa,
+               Herit_ndre, Herit_ndre_spa) %>%
+  pivot_longer(cols = -Time, names_to = "Type", values_to = "Heritability") %>%
+  mutate(
+    Index = case_when(
+  grepl("gndvi", Type) ~ "GNDVI",
+  grepl("ndre", Type) ~ "NDRE",
+  grepl("ndvi", Type) ~ "NDVI"
+),
+    Model = ifelse(grepl("_spa", Type), "Spatial", "Simple")
+  )
+
+
+ggplot_herit_results_filtered_nor_23_long_all <- ggplot(herit_results_filtered_nor_23_long_all, aes(x = Index, y = Heritability, fill = Index)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.4, color = "black") + # Randomly "jitter" (spread out) the data points horizontally by up to ±0.2 units on the x-axis (i.e., within each box)
+  # alternate geom_point() where all will be stacked in a vertical line so overlap issue.
+  facet_wrap(~ Model) +
+  labs(title = "Comparison of Heritability (h²) by VI and Model Type Normal 2023 NMSU",
+       x = "Vegetation Index",
+       y = "Heritability (h²)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")+
+  ylim(c(0,1))
+ggplot_herit_results_filtered_nor_23_long_all
+ggsave(filename = "Boxplot_Heritability_Comparison_VI_nmsu_nor_2023.png", plot = ggplot_herit_results_filtered_nor_23_long_all, path = "2023/output_images", width = 10, height = 8,dpi = 400)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################# Early Termination ################################
+
+
+
+
+
+
+2. *First treatment NMSU_Early_Termination 2023 *
+with spatial in the model, random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+
+
+
+*Early_Termination irrigation treatment*
+Loading and preparing data files
+```{r loading files 08152025}
+#import merged phenotype file 
+nmsu23_et_pheno <- read.csv("2023/MSI_data/Output_files/nmsu23_et_combined_phenotypes_MSI.csv", sep = ",") %>% 
+  select(-X) # remove index column
+
+# Before running models, make sure the variables are in correct form. Need to convert into factors and numeric if needed.
+  # converting all factorial variables into factor
+nmsu23_et_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(nmsu23_et_pheno[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+  ## make sure all variables are in correct form (factors or numeric)
+
+#import genotype file (same for 2022 and 2023)
+grm_aa <- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1)
+grm_aa <- as.matrix(grm_aa)
+mean(diag(grm_aa)) # 1
+hist(diag(grm_aa))
+
+grm_agh <- grm_aa+diag(.0005,length(grm_aa[,1]),length(grm_aa[,1])) # adding 0.05 nugget/ridge to ensure matrix is strictly positive definite
+grm_inverse <- solve(grm_agh)
+
+#now run the model for now without GRM but need to find GRM.
+
+```
+
+
+
+
+Normally if the range of numbers vary a lot between vi's and yield, then we can scale yield to variance level of vi's. but here since yield is in lb and upto 2 digit, should have that issue. If got any, we can always use scaled yield.
+```{r scaling yield }
+# we only have to scale 6 harvest values based on NDVI's value. Of course the variance between VI's differ but it should be okay to use Yield scaled onto NDVI for analysis with NDRE and GNDVI as well. 
+
+# Define the mapping of yield traits to NDVI columns
+yield_traits <- paste0("yld", 2:6)
+ndvi_times <- c("NDVI_145", "NDVI_165", "NDVI_201", "NDVI_228", "NDVI_270", "NDVI_299") # selecting one of the time point in each harvest window. selecting based on higher variation time point from heatmap, not actually calculating all. FOR this check the harvest windows or pheno cor heatmaps to see which time point falls in which window
+
+# Loop over each yield trait
+for (i in 1:length(yield_traits)) {
+  
+  trait <- yield_traits[i]
+  ndvi_col <- ndvi_times[i]
+  
+  # Calculate variance of NDVI and yield
+  ndvi_var <- var(nmsu23_et_pheno[[ndvi_col]], na.rm = TRUE)
+  yld_var <- var(nmsu23_et_pheno[[trait]], na.rm = TRUE)
+  
+  # Calculate scaling factor
+  sf <- sqrt(ndvi_var) / sqrt(yld_var)
+  
+  # Create new scaled yield column
+  new_col <- paste0("sca_", trait)
+  nmsu23_et_pheno[[new_col]] <- nmsu23_et_pheno[[trait]] * sf
+  
+  #  Print scaling factor
+  cat("Scaling factor for", trait, "using", ndvi_col, ":", sf, "\n")
+}
+
+
+# thus all scaled yields are added as a new column at last. 
+```
+
+```{r for checking outliers GZA_F}
+# Fit a linear model
+model <- lm(yld2 ~ Rep, data = nmsu23_et_pheno, na.action = na.exclude)
+
+# Calculate residuals
+nmsu23_et_pheno$residuals <- residuals(model, na.action = na.exclude)
+# Standardize the residuals
+nmsu23_et_pheno$residuals_standard <- scale(nmsu23_et_pheno$residuals, center = T, scale = T) 
+# Identify outliers
+outliers <- nmsu23_et_pheno %>% filter(abs(residuals_standard) > 3)
+# Print outliers
+# View(outliers)
+# none
+
+```
+
+
+Before running models, I will be keeping only the imaging events that overlap with available yield data i.e. remove time points before 1st harvest cz we don't have data on that. And for multi-trait models later on, I will need harvest data to correspond to. Thus remove imaging events 73.. 117. starting from 131.
+
+- Actual order of image collection and harvest: 
+"73", "88", "95", "101", "107", "117", "yld1",
+  "131", "138", "145", "152",  "yld2",
+  "160", "165", "173", "179",  "yld3",
+  "187", "192", "201", "206",  "yld4",
+  "215", "223", "228", "237", "242", "257", "263", "270", "278",  "yld5",
+  "283", "293", "299", "307", "yld6"
+  
+```{r run univariate models with spatial 08152025}
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+colnames(nmsu23_et_pheno)
+# first for NDVI
+# we have 31 imaging events  in ET treatment. 
+# Days: 73, 88, 95, 101, 107, 117, 131, 138, 145, 152, 160, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307
+# however first 6 are before first harvest and we don't have data for that, so remove those
+# filtered days: 31-6 = 25 h2.
+# 131, 138, 145, 152, 160, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307
+
+#  For NDVI_152
+st_nmsu23_et_152 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_152 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_152)$varcomp
+asreml::vpredict(st_nmsu23_et_152, heritA ~ V1 / (V1 + V5)) # 0.71
+
+# run for all time points
+```
+
+
+## Run for all time points and all yields
+ The fact that h2 > H2 here isn’t an error — it’s just that the models are not nested, so the two are capturing variance differently.
+
+```{r Heritability of yield (Narrow Sense as we have GRM) 08152025}
+
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+
+# for yield 2
+ # asreml.options(extra=1000,maxit =1000) # to setup more iterations for successful burn-in or convergence
+
+st_nmsu23_et_yld2 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_yld2)$varcomp
+asreml::vpredict(st_nmsu23_et_yld2, heritA ~ V1 / (V1 + V5)) # 0.67 with 0.10 SE
+
+
+# for yield 3
+st_nmsu23_et_yld3 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_yld3)$varcomp
+asreml::vpredict(st_nmsu23_et_yld3, heritA ~ V1 / (V1 + V5)) # 0.85 with 0.09 SE
+
+
+# for yield 4
+st_nmsu23_et_yld4 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld4 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_yld4)$varcomp
+asreml::vpredict(st_nmsu23_et_yld4, heritA ~ V1 / (V1 + V5)) # 0.67 with 0.12 SE
+
+
+# for yield 5
+st_nmsu23_et_yld5 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld5 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_yld5)$varcomp
+asreml::vpredict(st_nmsu23_et_yld5, heritA ~ V1 / (V1 + V5)) # 0.88 with 0.05 SE
+
+
+# for yield 6
+asreml.options(extra=500,maxit =500) # to setup more iterations for successful burn-in or convergence
+st_nmsu23_et_yld6 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld6 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_yld6)$varcomp
+asreml::vpredict(st_nmsu23_et_yld6, heritA ~ V1 / (V1 + V5)) # 0.93 with 0.03 SE
+
+# same with scaled yield for yld 6 (very high heritability)
+# without GRM:  0.942 with 0.02 SE
+
+```
+
+
+# Run for all VI's
+### STORE BOTH HERITABILITY AND VARIANCE COMPONENTS
+
+ To check variance components as well: store VC in another data frame
+ # Days: 131, 138, 145, 152, 160, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307 (CZ REMOVED TIME POINTS BEFORE 1st harvest and 161 imaging not in ET)
+
+
+### For modeling, check experimental design first, Rep>Range>Row here
+```{r For all VI's 08152025}
+# Define time points
+times <- c(131, 138, 145, 152, 160, 165, 173, 179, 187, 192, 201, 206, 215, 223, 228, 237, 242, 257, 263, 270, 278, 283, 293, 299, 307)
+
+# Initialize heritability results
+herit_results_et_23 <- data.frame(
+  Time = times,
+  Herit_ndvi = NA, Herit_ndvi_spa = NA,
+  Herit_gndvi = NA, Herit_gndvi_spa = NA,
+  Herit_ndre = NA, Herit_ndre_spa = NA
+)
+
+# Initialize variance component storage
+varcomp_results <- data.frame(
+  Time = numeric(0),
+  Index = character(0),
+  Model = character(0),
+  Component = character(0),
+  Estimate = numeric(0),
+  stringsAsFactors = FALSE
+)
+
+# Function to fit model and return heritability and variance components
+fit_heritability <- function(index_prefix, time_point, data) {
+  col_name <- paste0(index_prefix, "_", time_point)
+  
+  if (!col_name %in% colnames(data)) {
+    warning(paste("Column", col_name, "not found. Skipping."))
+    return(list(h2 = c(NA, NA), vc = NULL))
+  }
+  
+  # --- Simple Model ---
+  mod_simple <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE # add grm here
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 + Rep")),
+           random = ~ vm(Germplasm, grm_inverse),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Simple model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_simple <- NA
+  vc_simple <- NULL
+  if (!is.null(mod_simple)) {
+    h2_simple <- tryCatch({
+      vpredict(mod_simple, herit ~ V1 / (V1 + V2))$Estimate
+    }, error = function(e) NA)
+    
+    vc_simple <- tryCatch({
+      vc <- summary(mod_simple)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Simple")
+    }, error = function(e) NULL)
+  }
+  
+  # --- Spatial Model --- 
+  mod_spatial <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE # add grm here
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 + Rep")),
+           random = ~ vm(Germplasm, grm_inverse) + ar1(Range):ar1(Row),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Spatial model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_spatial <- NA
+  vc_spatial <- NULL
+  if (!is.null(mod_spatial)) {
+    h2_spatial <- tryCatch({
+      vpredict(mod_spatial, herit_spatial ~ V1 / (V1 + V5))$Estimate
+    }, error = function(e) NA)
+    
+    vc_spatial <- tryCatch({
+      vc <- summary(mod_spatial)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Spatial")
+    }, error = function(e) NULL)
+  }
+
+  return(list(h2 = c(h2_simple, h2_spatial),
+              vc = rbind(vc_simple, vc_spatial)))
+}
+
+# Loop through all time points and indices
+for (i in seq_along(times)) {
+  time <- times[i]
+  cat("\nProcessing time point:", time, "\n")
+  
+  for (index in c("NDVI", "GNDVI", "NDRE")) {
+    result <- fit_heritability(index, time, nmsu23_et_pheno)
+    
+    # Store heritabilities
+    herit_results_et_23[i, paste0("Herit_", tolower(index))] <- result$h2[1]
+    herit_results_et_23[i, paste0("Herit_", tolower(index), "_spa")] <- result$h2[2]
+    
+    # Store variance components
+    if (!is.null(result$vc)) {
+      result$vc$Index <- index
+      result$vc$Time <- time
+      varcomp_results <- bind_rows(varcomp_results, result$vc)
+    }
+  }
+}
+
+# Round heritability results to 2 decimals
+herit_results_et_23 <- herit_results_et_23 %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+# Done!
+print(head(herit_results_et_23))
+print(head(varcomp_results))
+
+
+```
+
+
+
+Checking some NA's or very high heritabilities or suspiciously differnet estimate among VI's to make sure the realibility of the estimates.
+we will also remove a few non-informative time points (h2 ~ 0) during the range of termination. SIT period June 15th through September 11th, 2023 (166 to 254 DOY) so remove time points 215 to 257 (based on results above where the values are mostly 0 or 1(by model failure)). Even after ET, a few time points afterwards shows good values meaning still growing (may be with rainfed water or remaining moisture). 
+- remove time points 215, 223, 228, 237, 242, 257 (i.e. after 4th harvest until irrigation started, there was nothing green on the ground)
+- also remove 187 and 283 (all 0's)
+
+```{r}
+# PART 1: First lets deal with NA's :for those that didn't run
+# NDVI: 131: 
+# NDRE; 160, 307
+# 1. 131 NDVI : set to 0
+st_nmsu23_et_ndvi_131 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_131 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_ndvi_131)$varcomp
+asreml::vpredict(st_nmsu23_et_ndvi_131, heritA ~ V3 / (V3 + V4)) # Row: 0.04 and bound
+  
+# NDRE: 160- set to 0.23 (row)
+st_nmsu23_et_ndre_160 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_160 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_ndre_160)$varcomp
+asreml::vpredict(st_nmsu23_et_ndre_160, heritA ~ V3 / (V3 + V4)) # Row: 0.23, bound with range
+
+# NDRE: 307- set to 0.56 with row
+st_nmsu23_et_ndre_307 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_307 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_ndre_307)$varcomp
+asreml::vpredict(st_nmsu23_et_ndre_307, heritA ~ V3 / (V3 + V4)) # Row: 0.56 
+
+
+# PART 2: too high values
+ # NDVI: 179
+ # GNDVI: 160, 179(much than ndvi), 192(much higher than other two), 278 (much higher than other two),  293 and 299 
+ # NDRE: 206 (h2=1)
+
+# NDRE: 206 : set to 0 (not trustworthy)
+st_nmsu23_et_ndre_206 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_206 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_ndre_206)$varcomp
+asreml::vpredict(st_nmsu23_et_ndre_206, heritA ~ V3 / (V3 + V4)) # still ~ 1, spatial portion pulled from residual
+st_nmsu23_et_ndre_206_updated <- update(st_nmsu23_et_ndre_206, start = st_nmsu23_et_ndre_206$gammas)
+summary(st_nmsu23_et_ndre_206_updated)$varcomp # still not fixed well. spatial pulled from residual
+asreml::vpredict(st_nmsu23_et_ndre_206_updated, heritA ~ V1 / (V1 + V5)) # 0.16
+
+#NDVI
+# NDVI 201 :all looks good: still 0.60 (not as high as other two indices) 
+st_nmsu23_et_ndvi_201 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_201 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_ndvi_201)$varcomp
+asreml::vpredict(st_nmsu23_et_ndvi_201, heritA ~ V1 / (V1 + V5)) #  0.83 
+
+
+# NDVI 179 :all looks good: still got higher value, 0.83 and everything looks good. 
+st_nmsu23_et_ndvi_179 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_179 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_ndvi_179)$varcomp
+asreml::vpredict(st_nmsu23_et_ndvi_179, heritA ~ V1 / (V1 + V5)) #  0.83 
+
+
+# GNDVI's
+## GNDVI 160 :all looks good: still got higher value, 0.94 and everything looks good. 
+st_nmsu23_et_gndvi_160 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_160 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_gndvi_160)$varcomp
+asreml::vpredict(st_nmsu23_et_gndvi_160, heritA ~ V1 / (V1 + V5)) #  0.15 
+
+## GNDVI 179 : change value to 0.91 (update model for convergence)
+# full model not converged, with row only 0.27. TRRY TO CONVERGE: did with running model again by starting with values from 1st model (gammas). this acts as starting values for model and sometimes help convergence. HERE IT DID. 
+st_nmsu23_et_gndvi_179 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_179 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_gndvi_179)$varcomp # ? in bound for genetic and spatial var components
+st_nmsu23_et_gndvi_179_updated <- update.asreml(st_nmsu23_et_gndvi_179, start = st_nmsu23_et_gndvi_179$gammas)
+summary(st_nmsu23_et_gndvi_179_updated)$varcomp # converged well, no warnings and no ? in bound
+asreml::vpredict(st_nmsu23_et_gndvi_179_updated, heritA ~ V1 / (V1 + V5)) #  0.91
+
+
+# GNDVI 192: still same 0.97 high value
+st_nmsu23_et_gndvi_192 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_192 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_gndvi_192)$varcomp 
+asreml::vpredict(st_nmsu23_et_gndvi_192, heritA ~ V1 / (V1 + V5)) #  0.97
+
+
+## GNDVI 278: its fine as 0.99 but unexpectedly too high ( looks like spatial pulled from residual)
+st_nmsu23_et_gndvi_278 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_278 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_gndvi_278)$varcomp
+asreml::vpredict(st_nmsu23_et_gndvi_278, heritA ~ V1 / (V1 + V5)) #  0.99 
+# update
+st_nmsu23_et_gndvi_278_updated <- update.asreml(st_nmsu23_et_gndvi_278, start = st_nmsu23_et_gndvi_278$gammas)
+summary(st_nmsu23_et_gndvi_278_updated)$varcomp # same as above...
+
+## GNDVI 293: its fine as 0.94
+st_nmsu23_et_gndvi_293 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_293 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_gndvi_293)$varcomp
+asreml::vpredict(st_nmsu23_et_gndvi_293, heritA ~ V1 / (V1 + V5)) #  0.94
+
+## GNDVI 299: its fine as 0.96
+st_nmsu23_et_gndvi_299 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_299 ~ 1 + Rep, #rep effect as fixed
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = nmsu23_et_pheno)}
+summary(st_nmsu23_et_gndvi_299)$varcomp
+asreml::vpredict(st_nmsu23_et_gndvi_299, heritA ~ V1 / (V1 + V5)) #  0.96
+
+
+
+# now lets fill in this vacant NA in the dataframe with the value we calculated here OR update with new values fixed above
+# four values to add: 131 (0) NDVI with spatial, 179(0.91), 206(0.6) GNDVI with spatial, 160(0.23), 206(0), 307(0.56) NDRE with spatial
+
+  #  add values in the dataframe
+# NDVI_131 —  (h2 = 0)
+herit_results_et_23$Herit_ndvi_spa[herit_results_et_23$Time == 131] <- 0
+
+# GNDVI_179 —  (h2 = 0.91)
+herit_results_et_23$Herit_gndvi_spa[herit_results_et_23$Time == 179] <- 0.91
+# GNDVI_206 — (h2 = 0.6)
+herit_results_et_23$Herit_gndvi_spa[herit_results_et_23$Time == 206] <- 0.88
+
+# NDRE_160 — (h2 = 0.23) row based
+herit_results_et_23$Herit_ndre_spa[herit_results_et_23$Time == 160] <- 0.23
+# NDRE_206 — (h2 = 0) weird
+herit_results_et_23$Herit_ndre_spa[herit_results_et_23$Time == 206] <- 0
+# NDRE_307 — (h2 = 0.56) row based
+herit_results_et_23$Herit_ndre_spa[herit_results_et_23$Time == 307] <- 0.56
+
+
+# part 3: remove time points with all ~ 0 heritability ( all <0.1)
+# 187, and 283
+# also remove time points in SIT period with ~ 0 heritability: 215, 223, 228, 237, 242, 257
+
+# now remove time points
+head(herit_results_et_23)
+dim(herit_results_et_23) # 25*7
+bad_times <- c(187,215, 223,228,237,242,257,283)
+herit_results_et_23_clean <- herit_results_et_23[!herit_results_et_23$Time %in% bad_times, ]
+dim(herit_results_et_23_clean) # 17*7, thus 8 time points removed
+
+
+# manually checked and all values are in right place, now lets export this file for future use. 
+
+write.csv(herit_results_et_23_clean, file = "2023/MSI_data/output_files/Heritabilities_MSI_filtered_aa_et_23.csv", row.names = F)
+```
+
+
+Comparison box plots
+
+```{r}
+
+herit_results_filtered_et_23 <- read.csv("2023/MSI_data/output_files/Heritabilities_MSI_filtered_aa_et_23.csv", sep = ",") 
+
+
+# Reshape all six heritability columns to long format
+herit_results_filtered_et_23_long_all <- herit_results_filtered_et_23 %>%
+  dplyr::select(Time, Herit_ndvi, Herit_ndvi_spa,
+               Herit_gndvi, Herit_gndvi_spa,
+               Herit_ndre, Herit_ndre_spa) %>%
+  pivot_longer(cols = -Time, names_to = "Type", values_to = "Heritability") %>%
+  mutate(
+    Index = case_when(
+  grepl("gndvi", Type) ~ "GNDVI",
+  grepl("ndre", Type) ~ "NDRE",
+  grepl("ndvi", Type) ~ "NDVI"
+),
+    Model = ifelse(grepl("_spa", Type), "Spatial", "Simple")
+  )
+
+range(herit_results_filtered_et_23_long_all$Heritability)
+# 0.00 0.99
+
+ggplot_herit_results_filtered_et_23_long_all <- ggplot(herit_results_filtered_et_23_long_all, aes(x = Index, y = Heritability, fill = Index)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.4, color = "black") + # Randomly "jitter" (spread out) the data points horizontally by up to ±0.2 units on the x-axis (i.e., within each box)
+  # alternate geom_point() where all will be stacked in a vertical line so overlap issue.
+  facet_wrap(~ Model) +
+  labs(title = "Comparison of Heritability (h²) by VI and Model Type ET 2023 NMSU",
+       x = "Vegetation Index",
+       y = "Heritability (h²)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  scale_fill_brewer(palette = "Set2")+
+  coord_cartesian(ylim = c(0, 1))
+
+ggplot_herit_results_filtered_et_23_long_all
+ggsave(filename = "Boxplot_Heritability_Comparison_VI_nmsu_et_2023.png", plot = ggplot_herit_results_filtered_et_23_long_all, path = "2023/output_images", width = 10, height = 8,dpi = 400)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+ 

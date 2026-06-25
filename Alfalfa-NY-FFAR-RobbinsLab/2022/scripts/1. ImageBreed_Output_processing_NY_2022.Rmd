@@ -1,0 +1,1205 @@
+---
+title: "2022_MSI_processing"
+author: "Dinesh Ghimire"
+date: "2026-05-04"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+This script is for processing NDVI data from imagebreed and yield data. Each block is usually for a different field trial i.e. treatments here. The growing degree days (GDD) are calculated here since the imagebreed GDD feature does not work for a crop (alfalfa) with multiple harvests, where we ressny the GDD after each harvest. 
+
+#Libraries
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,snyc..) particularly helpful. I'd be familiar with those before using this script
+# List of required packages
+required_packages <- c("dplyr", "lme4", "tidyr", "ggplot2", "readxl", "stringr")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/dg663/FFAR-Alfalfa-NY-DG")
+```
+
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NY"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NY 
+#below is what I gsny when I call gsnywd. Just check to make sure that the root for this script is the base of the github project, somsnyimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa-NY-DG"
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If somsnyhing is misssing please lsny me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NY cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+
+I am analyzing New York, Cornell University data. 
+# NY
+# NY files: Musgrave and Snyder research stations
+## NY 2022: Musgrave
+```{r Reading in the files and saving into shorter named file}
+# Musgrave trial
+ny22_mus_ori <-read.csv("2022/MSI_data/original_files/MSI_Musgrave_CU22.csv")
+```
+
+# 1. At first dealing with musgrave treatment
+
+
+### No need of weather data for spatial work but in case need to do random regression, processing it as well to gsny GDD. Check msnyadata readme_weather.txt for dsnyails on how and where to gsny weather files.
+
+## Growing Degree Days (GDD) discussion
+
+- The standard GDD formula is:
+
+$$ GDD = \max\left(\frac{T_{max} + T_{min}}{2} - T_{base}\right) $$
+
+- Daily GDD calculation with 5 as base temperature ((Sanderson, 1992),(Sharratt sny al., 1989), NY extension and UMN extension documents).
+- Alfalfa is a cool season crop and thus it doesn't always thrive when temperatures are too high. There is no strict maximum temperature limit but most commonly cutoff of 90F or 32.2 is used (Bruce Anderson, 2018, UNL extension)
+- Plants don't grow when temperatures are below their base temperature (T_base). so if tmax + tmin /2 is less than Tbase which is negative (meaning no growth), GDD is corrected to be 0. But if select both tmax and tmin to be more than 5 as below, GDD is always positive. 
+- from a agronomy fact shesny #112 article from Cornell: For many crops and pests, no upper limit is applied. However, development of some species stops or slows significantly above certain temperatures. If the average daily temperature is below the base temperature, no heat units are accumulated (GDD=0). If the maximum daily temperature is above the maximum temperature threshold for the species, the daily maximum temperature is ssny at the maximum temperature threshold. 
+- for growing season: 
+  - in NY, it range from march 1st to Nov 3rd.
+
+
+For this chunk, need to make sure year and weather dsnyails (units) are correct, ssny up min, max and base temperature, find out harvest dates, make intervals, based on that calculate GDD for each harvest interval because in alfalfa, the GDD ressny to 0 after harvest (assume so as there is no overground biomass after harvest). Thus *after each harvest, GDD restart* from 0. 
+
+```{r Calculating GDD and then divide the season according to harvest intervals, Musgrave/Aurora, Mus NY, 050426}
+#read in weather data.
+# weather data was imported from ttps://www.ncei.noaa.gov/cdo-web/search (use of station code) 
+
+# all data is in msnyric/Celsius. 
+# I need to filter the date range encompassing of all flights. Because in the weather file that I downloaded (NY_mus_2022-2023_air_temp.csv), I have data from January 1st of 2021 to Dec 31st of 2023. 
+# thus for 2022, i need to filter between flights data. for example in NY we start with March 1st through Nov 3rd as the growing season because from Nov 3 to march is considered as winter dormant phase. 
+
+#I started the first growing degree day Mar 7th and the october 21 (last day of harvest.
+#to calculate the Growing degree days(GDD), I dsnyermined the base temperature to be 5 Celsius (literature review). #for filtering out, the min temp of 5 and the max to be 32.2, and calculated accordingly. 
+
+# here we are filtering the weather data that falls within the specified time frame (mar 1 to nov 3 for 2022 in ny22_nom), then calculating GDD based on filtering for each day.
+ny22_wd <- read.csv("2022/meta_data/NY_mus_2022-2023_air_temp.csv") %>% # read data file
+  filter(STATION == "USC00300331") %>%  # Aurora or Musgrave station
+  dplyr::select(DATE, TMAX, TMIN) %>%
+  mutate(
+    DATE = as.Date(DATE, format = "%Y-%m-%d"),  # Ensure correct date format
+    TMAX = ifelse(is.na(TMAX), 5, TMAX),  # Replace NA with base temp (5°C)
+    TMIN = ifelse(is.na(TMIN), 5, TMIN)   # Same for TMIN
+  ) %>%
+  filter(between(DATE, as.Date("2022-03-01"), as.Date("2022-11-03"))) %>%  # 2022 date range from march 1st to nov 3rd
+  mutate(
+    # Cap temperatures for GDD calculation (alfalfa-specific thresholds)
+    TMAX = ifelse(TMAX > 5, TMAX, 5),  # Ensure TMAX ≥ 5°C
+    TMAX = ifelse(TMAX < 32.2, TMAX, 5),  # Cap TMAX at 32.2°C
+    TMIN = ifelse(TMIN > 5, TMIN, 5)  # Ensure TMIN ≥ 5°C
+  ) %>%
+  mutate(
+    GDD_per_day = (TMAX + TMIN) / 2 - 5 )  # Daily GDD calculation with 5 as base temperature ((Sanderson, 1992), NY extension and UMN extension documents)
+  
+
+#add a new column day by converting from date format to days of year or julian days (means which day of the year from 1 to 365.)
+ny22_wd$doy<-as.numeric(format(ny22_wd$DATE, "%j")) # doy meaning days of the year
+
+#harvest dates for NY Musgrave 2022
+#dsnyermination of GDD for yield harvest dates
+#see 2022/GroundTruth_data/aurora files for harvest dates
+
+#harvest dates are 3 ( NM have more harvest dates ~ 5-6 than NY because of weather). three harvests in 2022 ( June 6, 21 July and 20 September) 
+# 6/6, 7/21, 9/20
+#after harvest the GDD calculation ressnys for the next harvest. I calculate the GDD up to and including the harvest day (makes it simple)
+# keep in mind we have 03/01 as a first date and 11/03 as last date of the season.
+
+#1. calculating GDD from start of the season up to the first harvest i.e. from 2022-03-01 we ssny above to 2022-06-06 (1st harvest)
+ny22_wd %>% filter(between(DATE,as.Date("2022-03-01"),as.Date("2022-06-06"))) %>% summarize(GDD=sum(GDD_per_day))
+# now similarly for rest of the intervals
+# Interval 2: After 1st harvest to 2nd harvest (06-06 to 07-21)
+ny22_wd %>% filter(between(DATE, as.Date("2022-06-06"), as.Date("2022-07-21"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 3: After 2nd harvest to 3rd or last harvest (07-21 to 09-20)
+ny22_wd %>% filter(between(DATE, as.Date("2022-07-21"), as.Date("2022-09-20"))) %>% summarize(GDD = sum(GDD_per_day))
+
+
+# Check day of year for harvests
+format(as.Date("2022-06-06"), "%j")  # Harvest 1 → 157 days because J for Julian day if the day of the year.
+format(as.Date("2022-07-21"), "%j")  # Harvest 2 → 202
+format(as.Date("2022-09-20"), "%j")  # Harvest 3 → 263
+
+
+# Now calculate cumulative GDD using day-of-year (DOY)
+
+# GDD1: Start to first harvest (DOY < 158, because 1st harvest is 157th day so to filter upto 157th day, <119)
+ny22.GDD1 <- ny22_wd %>%
+  filter(doy < 158) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD2: 158–202 (06/06–07/21)
+ny22.GDD2 <- ny22_wd %>%
+  filter(doy %in% 158:202) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD3: 203–263 (07/21–09/20)
+ny22.GDD3 <- ny22_wd %>%
+  filter(doy %in% 203:263) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+
+##this "end" is GDD for flights after the last harvest, might be useful to see how they compare to dormancy ratings: GDD after last harvest (295–307)
+#not valid for 2022 data: ny22.GDDend <- ny22_wd %>% filter(doy > 294) %>% mutate(GDD_sum = cumsum(GDD_per_day)) %>%  select(doy, GDD_sum)
+
+# Combine all intervals togsnyher ( 3 intervals togsnyher)
+#and check this file to make sure that the GDD resets after harvest doy dates
+
+ny22_mus_GDD_sum <- rbind(ny22.GDD1, ny22.GDD2, ny22.GDD3)
+# View(ny22_mus_GDD_sum)
+write.csv(ny22_mus_GDD_sum,file =  "2022/meta_data/NY22_musgrave_doy_GDD_sum.csv") # can not be used for both musgrave and sny treatment because the harvest dates are different.
+```
+
+
+
+## NY musgrave 2022
+
+### Processing huge data from ImageBreed into relevant indices for reducing size and removing unnecessary columns
+  ### from imagebreed, we can gsny Blue, Green, Red (RGB) plus NIR bands, and some indices like CCCI, TGI, VARI, NDVI,and NDRE.
+  
+061225: kelly suggested to include other VI's as well. Went and looked at Ranjita's paper. Found out it's worth checking GNDVI which seems to be doing good job. So lets include GNDVI as well. first need to calculate GNDVI which is the ratio of (NIR-green)/(NIR+green). 
+
+```{r Processing huge data from ImageBreed into NDVI, NDRE and GNDVI, 05042026}
+# Step 1: Select NDVI, NDRE, and GNDVI-related columns
+colnames(ny22_mus_ori)
+ny22_mus <- ny22_mus_ori %>%
+  select(
+    plotNumber, germplasmName, replicate, rowNumber, colNumber,
+    matches("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Green..515.600nm..Green.Denoised.Original.Image.day"),
+    matches("Mean.Pixel.Value.NIR..780.3000nm..NIR.Denoised.Original.Image.day")
+  ) %>%
+  select(-contains("Harmonic")) %>%
+  pivot_longer(cols = 6:ncol(.), names_to = "name", values_to = "value")
+
+# Step 2: Extract GNDVI from Green and NIR values
+gndvi <- ny22_mus %>%
+  filter(grepl("Green.*Original.Image.day|NIR.*Original.Image.day", name)) %>%
+  mutate(
+    band_type = case_when(
+      grepl("Green", name) ~ "Green",
+      grepl("NIR", name) ~ "NIR"
+    ),
+    doy = as.numeric(str_extract(name, "(?<=Image\\.day\\.)\\d+\\.?\\d*"))
+  ) %>%
+  select(-name) %>%
+  pivot_wider(names_from = band_type, values_from = value) %>%
+  mutate(
+    value = (NIR - Green) / (NIR + Green),
+    trait = "GNDVI",
+    name = paste0("GNDVI_", doy)
+  ) %>%
+  select(germplasmName, replicate, plotNumber, rowNumber, colNumber, name, value)
+
+# Step 3: Clean up the original NDVI and NDRE names
+ny22_mus <- ny22_mus %>%
+  filter(!grepl("Green|NIR", name)) %>%
+  bind_rows(gndvi)
+ny22_mus$name
+ny22_mus$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.", "NDVI_", ny22_mus$name)
+ny22_mus$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.", "NDRE_", ny22_mus$name)
+
+# Step 4: Extract DOY (beacuse GNDVI and other two indices are in different name format, need to use case_when to separate out the formula)
+ny22_mus <- ny22_mus %>%
+  mutate(
+    trait = str_extract(name, "^[^_]+")
+  ) %>%
+  mutate(
+    doy = case_when(
+      trait == "GNDVI" ~ as.numeric(str_extract(name, "(?<=_)\\d+\\.?\\d*")),
+      TRUE ~ as.numeric(str_extract(name, "(?<=day\\.)\\d+\\.?\\d*"))
+    ),
+    doy = ceiling(doy) # round up to next bigger value
+  )
+
+# Step 5: Assign harvest window categories
+ny22_mus$harvest <- "0"
+ny22_mus[ny22_mus$doy <= 157, ]$harvest <- "1"
+ny22_mus[ny22_mus$doy >= 158 & ny22_mus$doy <= 202, ]$harvest <- "2"
+ny22_mus[ny22_mus$doy >= 203 & ny22_mus$doy <= 263, ]$harvest <- "3"
+ny22_mus[ny22_mus$doy > 264, ]$harvest <- "end"
+
+# Step 6: Create trait column (NDVI, NDRE, GNDVI)
+ny22_mus$trait <- vapply(strsplit(ny22_mus$name, "_", fixed = TRUE), `[`, "", 1)
+
+
+
+# now we are going to join this MSI or image file with GDD file we created in previous chunk
+ #then also filter out plots that are not part of this particular analysis as well as check plots
+
+# Step 7: Merge with GDD file from previous chunk: Merging MSI file with GDD file
+ny22_mus_gdd <- ny22_mus %>%
+  left_join(ny22_mus_GDD_sum, by = "doy") %>%
+  arrange(doy, trait, plotNumber) %>%
+  mutate(loc = "NY-mus", year = "2022")
+
+
+# later on while merging two files found that range or column number in MSI file is swapped, so changing that here as well. 
+# ny22_mus$colNumber <- 9 - ny22_mus$colNumber # did for nmsu data 
+
+# Step 8: Export final file
+write.csv(ny22_mus_gdd, file = "2022/MSI_data/output_files/NY22_musgrave_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv", row.names = FALSE)
+
+```
+
+
+
+
+Merging MSI with harvest data file (ground truth): 
+The harvest data files already have all three harvest column in a single file so no need to merge.
+Next, processing Both MSI and Yield data to merge
+
+```{r Processing Both MSI and Yield data to merge}
+#1. Processing MSI first
+  # load MSI data and process it
+ny22_mus <- read.csv("2022/MSI_data/output_files/NY22_musgrave_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv") # longer version
+unique(ny22_mus$colNumber) # 51 to 1
+length(unique(ny22_mus$colNumber)) # to confirm its continuously from 51 to 1, yes, its 51
+unique(ny22_mus$replicate) # 1 to 4
+
+# now lets rename the columns
+colnames(ny22_mus)
+ny22_mus <- ny22_mus %>% 
+  rename(Germplasm = germplasmName, Row = rowNumber, Range = colNumber, Plot = plotNumber, Rep = replicate )
+
+# From now we are making data file easier for analysis and modeling by pivot wider function for VI's and only necessary columns
+ny22_mus_wider <- ny22_mus %>%
+  mutate(doy = as.numeric(doy)) %>%
+  pivot_wider(
+    id_cols = c(Germplasm, Rep, Plot, Row, Range),  # select all necessary columns
+    names_from = c(trait, doy),
+    values_from = value,
+    names_sep = "_"
+  )
+NY_musgrave_22_MSI <- ny22_mus_wider # this is the imaging data file
+
+ ## saving this file
+write.csv(NY_musgrave_22_MSI, file = "2022/MSI_data/output_files/NY_musgrave_22_MSI.csv")
+
+# separating out VI's (NDVI, GNDVI, NDRE) as separate data file and save them.
+NY_musgrave_22_MSI <- read.csv("2022/MSI_data/output_files/NY_musgrave_22_MSI.csv")
+# NDVI columns
+ndvi_22 <- NY_musgrave_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDVI_"))
+write.csv(ndvi_22, "2022/MSI_data/output_files/NY_musgrave_22_NDVI.csv", row.names = FALSE)
+
+# NDRE columns
+ndre_22 <- NY_musgrave_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDRE_"))
+write.csv(ndre_22, "2022/MSI_data/output_files/NY_musgrave_22_NDRE.csv", row.names = FALSE)
+
+# GNDVI columns
+gndvi_22 <- NY_musgrave_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("GNDVI"))
+write.csv(gndvi_22, "2022/MSI_data/output_files/NY_musgrave_22_GNDVI.csv", row.names = FALSE)
+
+ ## checked all three files have same columns numbers
+
+unique(ny22_mus$Plot)
+gndvi_22$Plot # 204
+
+#2. Yield data: now lets work with yield data so we can merge MSI + yield
+ ## Rename MSI file to match with yield data file
+ny22_mus_yld <- read.csv("2022/GroundTruth_data/NY22_Musgrave_yield_data.csv")
+colnames(ny22_mus_yld)
+
+ny22_mus_yld <- ny22_mus_yld %>% 
+  rename(Plot = plot, Rep = rep, Germplasm = Cultivar.Name) # Plot and Rep are already same as MSI data columns
+
+
+# IMP !!!!!!!
+## looking at data files and layouts from imagebreed and harvest files
+ ### Only the 36 interior ranges (plots 113–148) are common across:
+###   -  MSI data
+###   - Harvest data
+# AND
+## MSI plot IDs are encoded (e.g., 2121010)
+## Extract the true plot number:
+## - Take digits corresponding to row–range → e.g., 101
+## - Match with yield file plot IDs (113–148)
+
+#Align datasets by reconstructing plot IDs and filtering to the 36 harvest plots (113–148) to ensure consistent spatial matching between MSI and yield data.
+
+# 3. Align MSI datasets
+
+ # 3.1. first make plot id three digit as in yield data
+ny22_mus_wider_clean_plot <- ny22_mus_wider %>%
+  mutate(
+    Plot = as.character(Plot),
+    Plot_clean = as.numeric(substr(Plot, 4, 6)))
+ 
+# 3.2. Then we can direclty join and filter plots that are in between 113-148, 213-248, 313-348, 413-448
+
+# 3: Join MSI with yield data
+ny22_mus_combined <- ny22_mus_wider_clean_plot %>%
+  inner_join(
+    ny22_mus_yld %>% 
+      rename(Plot_clean = Plot),
+    by = c("Plot_clean", "Rep")) # since germplasm are named differently (like capital letter and small)
+
+# yield file has 144 data and thus this combined also has same 144 data points. 
+# lets just move yield columns forward (but first rename and select correct plot numbers)
+ ny22_mus_combined <- ny22_mus_combined %>%
+  rename(Germplasm = Germplasm.x) %>%
+  select(-Plot) %>%
+  rename(Plot = Plot_clean)
+ # now rearrange columns ( and removed germplasm.y, entry,)
+ny22_mus_combined <- ny22_mus_combined %>%
+   dplyr::select(
+    1:4,                          # Keep the first 5 columns as-is
+    71, # keep plot column
+    74:77,                   # Move columns 77 onward next
+    5:70)                     # Then include the NDRE/NDVI columns 
+ # double check all columns are looking fine and we have all MSI's and harvest columns along with Germplasm, Plot, Rep, Range, Row
+
+colnames(ny22_mus_combined)
+unique(ny22_mus_combined$Rep) # 1 2 3 4
+unique(ny22_mus_combined$Row) # 1 2 3 4
+unique(ny22_mus_combined$Range) # 36 ( from 36 to 1)
+unique(ny22_mus_combined$Germplasm) # 36 unique germplasm
+
+
+
+# perfect, the combined file looks great. 
+
+# thus combined file. now final file has Germplasm, Rep, Plot, Row, Rep, NDVI, GNDVI, NDRE, Yields But yields have . in its empty one, so replace with NA
+colnames(ny22_mus_combined)
+yield_traits <- c("yld1", "yld2", "yld3", "tot22")
+sapply(ny22_mus_combined[yield_traits], class)
+ny22_mus_combined$yld2 <- as.numeric(ny22_mus_combined$yld2)
+ny22_mus_combined$tot22 <- as.numeric(ny22_mus_combined$tot22)
+
+
+write.csv(ny22_mus_combined, file = "2022/MSI_data/output_files/NY22_mus_combined_phenotypes_All_MSI.csv")
+
+# manually checked combined file with individual file and it worked.
+
+# now lets save files for each NDVI, NDRE and GNDVI
+# separating out NDVI, NDRE and GNDVI columns as separate data file and save them.
+
+gndvi22_mus <- ny22_mus_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22, starts_with("GNDVI_"))
+write.csv(gndvi22_mus, "2022/MSI_data/output_files/NY_musgrave_22_GNDVI_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndre22_mus <- ny22_mus_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22, starts_with("NDRE_"))
+write.csv(ndre22_mus, "2022/MSI_data/output_files/NY_musgrave_22_NDRE_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndvi22_mus <- ny22_mus_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range,yld1, yld2, yld3, tot22, starts_with("NDVI_"))
+write.csv(ndvi22_mus, "2022/MSI_data/output_files/NY_musgrave_22_NDVI_combined_MSI_Yield.csv", row.names = FALSE)
+```
+
+
+### Also add scaled yield columns in the data files (scaling yield to GNDVI level)
+Normally if the range of numbers vary a lot between vi's and yield, then we can scale yield to variance level of vi's. but here since yield is in lb and upto 2 digit, should have that issue. If got any, we can always use scaled yield.
+```{r scaling yield and adding to data file, Musgrave 2022}
+# we only have to scale 3 harvest values based on GNDVI's value. Of course the variance between VI's differ but it should be okay to use Yield scaled onto GNDVI for analysis with NDRE and NDVI as well. 
+ny_mus_pheno_22 <- read.csv("2022/MSI_data/output_files/NY22_mus_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X)
+# Define the mapping of yield traits to GNDVI columns
+yield_traits <- paste0("yld", 1:3)
+GNDVI_times_mus_22 <- c("GNDVI_154", "GNDVI_201", "GNDVI_263") # selecting one of the time point in each harvest window. selecting last one
+
+# Loop over each yield trait
+for (i in 1:length(yield_traits)) {
+  
+  trait <- yield_traits[i]
+  GNDVI_col <- GNDVI_times_mus_22[i]
+  
+  # Calculate variance of GNDVI and yield
+  GNDVI_var <- var(ny_mus_pheno_22[[GNDVI_col]], na.rm = TRUE)
+  yld_var <- var(ny_mus_pheno_22[[trait]], na.rm = TRUE)
+  
+  # Calculate scaling factor
+  sf <- sqrt(GNDVI_var) / sqrt(yld_var)
+  
+  # Create new scaled yield column
+  new_col <- paste0("sca_", trait)
+  ny_mus_pheno_22[[new_col]] <- ny_mus_pheno_22[[trait]] * sf
+  
+  #  Print scaling factor
+  cat("Scaling factor for", trait, "using", GNDVI_col, ":", sf, "\n")
+}
+
+
+# thus all scaled yields are added as a new column at last. 
+
+# now rearrange columns ( bring scaled yield column earlier)
+ny_mus_pheno_22_rearranged <- ny_mus_pheno_22 %>%
+   dplyr::select(
+    1:9,                          # Keep the first 5 columns as-is
+    76:78, # keep plot column
+    10:75)                   # Move columns 77 onward next  
+
+
+# export
+write.csv(ny_mus_pheno_22_rearranged, file = "2022/MSI_data/output_files/Final_NY22_mus_combined_phenotypes_All_MSI.csv")
+
+# manually checked combined file with individual file and it worked.
+
+# now lets save files for each NDVI, NDRE and GNDVI
+# separating out NDVI, NDRE and GNDVI columns as separate data file and save them.
+
+gndvi22_mus <- ny_mus_pheno_22_rearranged %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22, sca_yld1, sca_yld2, sca_yld3,starts_with("GNDVI_"))
+write.csv(gndvi22_mus, "2022/MSI_data/output_files/Final_NY_musgrave_22_GNDVI_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndre22_mus <- ny_mus_pheno_22_rearranged %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22, sca_yld1, sca_yld2, sca_yld3,starts_with("NDRE_"))
+write.csv(ndre22_mus, "2022/MSI_data/output_files/Final_NY_musgrave_22_NDRE_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndvi22_mus <- ny_mus_pheno_22_rearranged %>%
+  select(Germplasm, Rep, Plot, Row, Range,yld1, yld2, yld3, tot22, sca_yld1, sca_yld2, sca_yld3,starts_with("NDVI_"))
+write.csv(ndvi22_mus, "2022/MSI_data/output_files/Final_NY_musgrave_22_NDVI_combined_MSI_Yield.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+## Run a few simple models for saniity check
+```{r Run a few simple models for sanity check }
+colnames(ny22_mus_combined)
+model<-lmer(NDVI_145~1+Rep+(1|Germplasm),data=ny22_mus_combined)
+VarCorr(model) 
+# here std given, meaning variance is square of these
+0.010587^2/(0.010587^2+0.021613^2) # 0.20
+
+model_2<-lmer(GNDVI_263~1+Rep+(1|Germplasm),data=ny22_mus_combined)
+VarCorr(model_2) 
+model_2
+0.0081607^2/(0.0081607^2+0.0186384^2) # 0.16
+vc <- as.data.frame(VarCorr(model_2)) # this directly gives variance component
+vc
+```
+
+
+
+# understanding data more for making experimental designs
+
+```{r Check row, range, rep, germplasm, plot counts}
+unique(ny22_mus_combined$Rep) # 1,2,3,4
+unique(ny22_mus_combined$Row) # 1  2  3  4  
+unique(ny22_mus_combined$Range) # 36 35 34 33 32 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10  9 8  7  6  5  4  3  2  1
+unique(ny22_mus_combined$Germplasm) # 36 unique
+unique(ny22_mus_combined$Plot) # 144 unique plots ( 36*4)
+```
+
+
+# check outliers for yield data
+```{r, check outliers for yield data}
+# Fit a linear model
+colnames(ny22_mus_combined)
+# Outliers in Yield 1
+model <- lm(yld1 ~ Rep+Row+Range+Germplasm, data = ny22_mus_combined, na.action = na.exclude) #model explains ~ 51% (R2= 51%)
+# now calculate residuals based on model
+
+# Calculate residuals
+ny22_mus_combined$residuals <- residuals(model, na.action = na.exclude)
+# Standardize the residuals
+ny22_mus_combined$residuals_standard <- scale(ny22_mus_combined$residuals, center = T, scale = T) 
+# Identify outliers
+outliers <- ny22_mus_combined %>% filter(abs(residuals_standard) > 3)
+# Print outliers
+View(outliers) # one close to 3, so would not consider it as outlier
+
+hist(model$residuals) # looks normal so can use standarized residuals which follow a normal distribution.
+hist(ny22_mus_combined$residuals_standard) # looks normal but slightly skewed still can use standarized residuals which follow a normal distribution.
+hist(ny22_mus_combined$residuals) # looks normal but slightly skewed still can use standarized residuals which follow a normal distribution.
+
+
+
+# for all yields
+library(dplyr)
+library(purrr)
+
+# Traits
+yield_traits <- paste0("yld", 1:3)
+
+# Function to fit model, calculate residuals, standardize, and extract outliers
+process_outliers <- function(trait, data) {
+  # Build formula dynamically
+  formula <- as.formula(paste(trait, "~ Rep + Row + Range + Germplasm"))
+  
+  # Fit model
+  model <- lm(formula, data = data, na.action = na.exclude)
+  
+  # Gsny residuals and standardized residuals
+  data[[paste0(trait, "_resid")]] <- residuals(model, na.action = na.exclude)
+  data[[paste0(trait, "_resid_std")]] <- scale(data[[paste0(trait, "_resid")]], center = TRUE, scale = TRUE)
+  
+  # Extract outliers
+  outliers <- data %>% filter(abs(.data[[paste0(trait, "_resid_std")]]) > 3)
+  
+  return(outliers)
+}
+
+# Apply the function to all yield traits
+outlier_list <- map(yield_traits, ~process_outliers(.x, ny22_mus_combined))
+
+# Name the list elements for clarity
+names(outlier_list) <- yield_traits
+
+# View outliers for each trait
+View(outliers)
+# plot and standard residual value
+
+# for somsnyhing closer to 3 are judgement calls but over 3.5 or 4 can be removed. 
+# In this case, there is only one plot but ~ 3, so not removing it. 
+```
+
+
+MSI Range of values to check outliers
+```{r MSI Range of values to check outliers and sanity range check}
+colnames(ny22_mus_combined)
+library(dplyr)
+
+# Gsny column names of interest
+index_cols <- grep("^(GNDVI|NDVI|NDRE)_", colnames(ny22_mus_combined), value = TRUE)
+
+# Calculate min and max for each
+index_summary <- sapply(index_cols, function(col) {
+  vals <- ny22_mus_combined[[col]]
+  c(min = min(vals, na.rm = TRUE), max = max(vals, na.rm = TRUE))
+})
+
+# Convert to data frame
+index_summary_df <- as.data.frame(t(index_summary))
+index_summary_df$Index <- sub("_.*", "", rownames(index_summary_df))
+index_summary_df$Column <- rownames(index_summary_df)
+index_summary_df <- index_summary_df %>%
+  select(Index, Column, Min = min, Max = max)
+
+# View the result
+View(index_summary_df)
+
+#mean 
+
+index_summary_df %>%
+  group_by(Index) %>%
+  summarise(
+    Mean_Min = mean(Min, na.rm = TRUE),
+    Mean_Max = mean(Max, na.rm = TRUE)
+  )
+
+Index Mean_Min Mean_Max
+  <chr>    <dbl>    <dbl>
+1 GNDVI   0.0721    0.271
+2 NDRE    0.266     0.470
+3 NDVI    0.352     0.523
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################# SNYDER, Ithaca Trial ################################
+
+
+
+I am analyzing New York, Cornell University data. 
+# NY
+# NY files: Musgrave and Snyder research stations
+## NY 2022: Snyder
+```{r Reading in the files and saving into shorter named file}
+# Snyder trial
+ny22_sny_ori <-read.csv("2022/MSI_data/original_files/MSI_Snyder_CU22.csv")
+```
+
+
+### No need of weather data for spatial work but in case need to do random regression, processing it as well to get GDD. Check metadata readme_weather.txt for details on how and where to get weather files.
+
+## Growing Degree Days (GDD) discussion
+### Step 2: GDD calculation: it's similar to musgrave but because the harvest dates are different slightly, the files will be different.
+
+- The standard GDD formula is:
+
+$$ GDD = \max\left(\frac{T_{max} + T_{min}}{2} - T_{base}\right) $$
+
+
+- Daily GDD calculation with 5 as base temperature ((Sanderson, 1992),(Sharratt sny al., 1989), NY extension and UMN extension documents).
+- Alfalfa is a cool season crop and thus it doesn't always thrive when temperatures are too high. There is no strict maximum temperature limit but most commonly cutoff of 90F or 32.2 is used (Bruce Anderson, 2018, UNL extension)
+- Plants don't grow when temperatures are below their base temperature (T_base). so if tmax + tmin /2 is less than Tbase which is negative (meaning no growth), GDD is corrected to be 0. But if select both tmax and tmin to be more than 5 as below, GDD is always positive. 
+- from a agronomy fact shesny #112 article from Cornell: For many crops and pests, no upper limit is applied. However, development of some species stops or slows significantly above certain temperatures. If the average daily temperature is below the base temperature, no heat units are accumulated (GDD=0). If the maximum daily temperature is above the maximum temperature threshold for the species, the daily maximum temperature is ssny at the maximum temperature threshold. 
+- for growing season: 
+  - in NY, it range from march 1st to Nov 3rd.
+
+
+For this chunk, need to make sure year and weather details (units) are correct, ssny up min, max and base temperature, find out harvest dates, make intervals, based on that calculate GDD for each harvest interval because in alfalfa, the GDD ressny to 0 after harvest (assume so as there is no overground biomass after harvest). Thus *after each harvest, GDD restart* from 0. 
+
+```{r Calculating GDD and then divide the season according to harvest intervals, Snyder/Ithaca, Sny NY, 050526}
+#read in weather data.
+# weather data was imported from ttps://www.ncei.noaa.gov/cdo-web/search (use of station code) 
+
+# all data is in msnyric/Celsius. 
+# I need to filter the date range encompassing of all flights. Because in the weather file that I downloaded (NY_sny_2022-2023_air_temp.csv), I have data from January 1st of 2021 to Dec 31st of 2023. 
+# thus for 2022, i need to filter between flights data. for example in NY we start with March 1st through Nov 3rd as the growing season because from Nov 3 to march is considered as winter dormant phase. 
+
+#I started the first growing degree day Mar 7th and the october 21 (last day of harvest.
+#to calculate the Growing degree days(GDD), I dsnyermined the base temperature to be 5 Celsius (literature review). #for filtering out, the min temp of 5 and the max to be 32.2, and calculated accordingly. 
+
+# here we are filtering the weather data that falls within the specified time frame (mar 1 to nov 3 for 2022 in ny22_nom), then calculating GDD based on filtering for each day.
+ny22_sny_wd <- read.csv("2022/meta_data/NY_sny_2022-2023_air_temp.csv") %>% # read data file, wd for weather data
+  filter(STATION == "USC00304174") %>%  # Ithaca or Snyder station !!!
+  dplyr::select(DATE, TMAX, TMIN) %>%
+  mutate(
+    DATE = as.Date(DATE, format = "%Y-%m-%d"),  # Ensure correct date format
+    TMAX = ifelse(is.na(TMAX), 5, TMAX),  # Replace NA with base temp (5°C)
+    TMIN = ifelse(is.na(TMIN), 5, TMIN)   # Same for TMIN
+  ) %>%
+  filter(between(DATE, as.Date("2022-03-01"), as.Date("2022-11-03"))) %>%  # 2022 date range from march 1st to nov 3rd
+  mutate(
+    # Cap temperatures for GDD calculation (alfalfa-specific thresholds)
+    TMAX = ifelse(TMAX > 5, TMAX, 5),  # Ensure TMAX ≥ 5°C
+    TMAX = ifelse(TMAX < 32.2, TMAX, 5),  # Cap TMAX at 32.2°C
+    TMIN = ifelse(TMIN > 5, TMIN, 5)  # Ensure TMIN ≥ 5°C
+  ) %>%
+  mutate(
+    GDD_per_day = (TMAX + TMIN) / 2 - 5 )  # Daily GDD calculation with 5 as base temperature ((Sanderson, 1992), NY extension and UMN extension documents)
+  
+
+#add a new column day by converting from date format to days of year or julian days (means which day of the year from 1 to 365.)
+ny22_sny_wd$doy<-as.numeric(format(ny22_sny_wd$DATE, "%j")) # doy meaning days of the year
+
+#harvest dates for NY Snyder 2022
+#determination of GDD for yield harvest dates
+#see 2022/GroundTruth_data/Ithaca files for harvest dates
+
+#harvest dates are 3 ( NM have more harvest dates ~ 5-6 than NY because of weather). three harvests in 2022 ( June 14, 27 July and 16 September) 
+# 6/14, 7/27, 9/16
+#after harvest the GDD calculation ressnys for the next harvest. I calculate the GDD up to and including the harvest day (makes it simple)
+# keep in mind we have 03/01 as a first date and 11/03 as last date of the season.
+
+#1. calculating GDD from start of the season up to the first harvest i.e. from 2022-03-01 we ssny above to 2022-06-14 (1st harvest)
+ny22_sny_wd %>% filter(between(DATE,as.Date("2022-03-01"),as.Date("2022-06-14"))) %>% summarize(GDD=sum(GDD_per_day))
+# now similarly for rest of the intervals
+# Interval 2: After 1st harvest to 2nd harvest (06-14 to 07-27)
+ny22_sny_wd %>% filter(between(DATE, as.Date("2022-06-14"), as.Date("2022-07-27"))) %>% summarize(GDD = sum(GDD_per_day))
+
+# Interval 3: After 2nd harvest to 3rd or last harvest (07-27 to 09-16)
+ny22_sny_wd %>% filter(between(DATE, as.Date("2022-07-27"), as.Date("2022-09-16"))) %>% summarize(GDD = sum(GDD_per_day))
+
+
+# Check day of year for harvests
+format(as.Date("2022-06-14"), "%j")  # Harvest 1 → 165 days because J for Julian day if the day of the year.
+format(as.Date("2022-07-27"), "%j")  # Harvest 2 → 208
+format(as.Date("2022-09-16"), "%j")  # Harvest 3 → 259
+
+
+# Now calculate cumulative GDD using day-of-year (DOY)
+
+# GDD1: Start to first harvest (DOY < 166, because 1st harvest is 165th day so to filter upto 165th day, <166)
+ny22_sny.GDD1 <- ny22_sny_wd %>%
+  filter(doy < 166) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD2: 166–208 (06-14 to 07-27)
+ny22_sny.GDD2 <- ny22_sny_wd %>%
+  filter(doy %in% 166:208) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+# GDD3: 209–259 (07-27 to 09-16)
+ny22_sny.GDD3 <- ny22_sny_wd %>%
+  filter(doy %in% 209:259) %>%
+  mutate(GDD_sum = cumsum(GDD_per_day)) %>%
+  select(doy, GDD_sum)
+
+
+##this "end" is GDD for flights after the last harvest, might be useful to see how they compare to dormancy ratings: GDD after last harvest (295–307)
+#not valid for 2022 data: ny22.GDDend <- ny22_wd %>% filter(doy > 294) %>% mutate(GDD_sum = cumsum(GDD_per_day)) %>%  select(doy, GDD_sum)
+
+# Combine all intervals together ( 3 intervals together)
+#and check this file to make sure that the GDD resets after harvest doy dates
+
+ny22_sny_GDD_sum <- rbind(ny22_sny.GDD1, ny22_sny.GDD2, ny22_sny.GDD3)
+ # here cross check the combined file. after each harvest, GDD will restart (value goes down to gdd from that day only)
+# View(ny22_sny_GDD_sum)
+write.csv(ny22_sny_GDD_sum,file =  "2022/meta_data/NY22_Snyder_doy_GDD_sum.csv") # can not be used for both Snyder and Mus treatment because the harvest dates are different.
+```
+
+
+
+## NY Snyder 2022
+
+### Processing huge data from ImageBreed into relevant indices for reducing size and removing unnecessary columns
+  ### from imagebreed, we can get Blue, Green, Red (RGB) plus NIR bands, and some indices like CCCI, TGI, VARI, NDVI,and NDRE.
+  
+Using multiple indices especifically NDVI, GNDVI, NDRE. 
+
+```{r Processing huge data from ImageBreed into NDVI, NDRE and GNDVI, 05052026}
+# Step 1: Select NDVI, NDRE, and GNDVI-related columns
+colnames(ny22_sny_ori)
+ny22_sny <- ny22_sny_ori %>%
+  select(
+    plotNumber, germplasmName, replicate, rowNumber, colNumber,
+    matches("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.day"),
+    matches("Mean.Pixel.Value.Green..515.600nm..Green.Denoised.Original.Image.day"),
+    matches("Mean.Pixel.Value.NIR..780.3000nm..NIR.Denoised.Original.Image.day")
+  ) %>%
+  select(-contains("Harmonic")) %>%
+  pivot_longer(cols = 6:ncol(.), names_to = "name", values_to = "value")
+
+# Step 2: Extract GNDVI from Green and NIR values
+gndvi <- ny22_sny %>%
+  filter(grepl("Green.*Original.Image.day|NIR.*Original.Image.day", name)) %>%
+  mutate(
+    band_type = case_when(
+      grepl("Green", name) ~ "Green",
+      grepl("NIR", name) ~ "NIR"
+    ),
+    doy = as.numeric(str_extract(name, "(?<=Image\\.day\\.)\\d+\\.?\\d*"))
+  ) %>%
+  select(-name) %>%
+  pivot_wider(names_from = band_type, values_from = value) %>%
+  mutate(
+    value = (NIR - Green) / (NIR + Green),
+    trait = "GNDVI",
+    name = paste0("GNDVI_", doy)
+  ) %>%
+  select(germplasmName, replicate, plotNumber, rowNumber, colNumber, name, value)
+
+# Step 3: Clean up the original NDVI and NDRE names
+ny22_sny <- ny22_sny %>%
+  filter(!grepl("Green|NIR", name)) %>%
+  bind_rows(gndvi)
+ny22_sny$name
+ny22_sny$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NRN.NDVI.Vegetative.Index.Image.", "NDVI_", ny22_sny$name)
+ny22_sny$name <- gsub("Mean.Pixel.Value.Merged.3.Bands.NReN.NDRE.Vegetative.Index.Image.", "NDRE_", ny22_sny$name)
+
+# Step 4: Extract DOY (beacuse GNDVI and other two indices are in different name format, need to use case_when to separate out the formula)
+ny22_sny <- ny22_sny %>%
+  mutate(
+    trait = str_extract(name, "^[^_]+")
+  ) %>%
+  mutate(
+    doy = case_when(
+      trait == "GNDVI" ~ as.numeric(str_extract(name, "(?<=_)\\d+\\.?\\d*")),
+      TRUE ~ as.numeric(str_extract(name, "(?<=day\\.)\\d+\\.?\\d*"))
+    ),
+    doy = ceiling(doy) # round up to next bigger value
+  )
+
+# Step 5: Assign harvest window categories
+ny22_sny$harvest <- "0"
+ny22_sny[ny22_sny$doy <= 165, ]$harvest <- "1"
+ny22_sny[ny22_sny$doy >= 166 & ny22_sny$doy <= 208, ]$harvest <- "2"
+ny22_sny[ny22_sny$doy >= 209 & ny22_sny$doy <= 259, ]$harvest <- "3"
+ny22_sny[ny22_sny$doy > 260, ]$harvest <- "end"
+
+# Step 6: Create trait column (NDVI, NDRE, GNDVI)
+ny22_sny$trait <- vapply(strsplit(ny22_sny$name, "_", fixed = TRUE), `[`, "", 1)
+
+
+
+# now we are going to join this MSI or image file with GDD file we created in previous chunk
+ #then also filter out plots that are not part of this particular analysis as well as check plots
+
+# Step 7: Merge with GDD file from previous chunk: Merging MSI file with GDD file
+ny22_sny_gdd <- ny22_sny %>%
+  left_join(ny22_sny_GDD_sum, by = "doy") %>%
+  arrange(doy, trait, plotNumber) %>%
+  mutate(loc = "NY-sny", year = "2022")
+
+
+# later on while merging two files found that range or column number in MSI file is swapped, so changing that here as well. 
+# ny22_sny$colNumber <- 9 - ny22_sny$colNumber # did for nmsu data 
+
+# Step 8: Export final file
+write.csv(ny22_sny_gdd, file = "2022/MSI_data/output_files/NY22_Snyder_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+Merging MSI with harvest data file (ground truth): 
+The harvest data files already have all three harvest column in a single file so no need to merge.
+Next, processing Both MSI and Yield data to merge
+
+```{r Processing Both MSI and Yield data to merge, 05052026}
+#1. Processing MSI first
+  # load MSI data and process it
+ny22_sny <- read.csv("2022/MSI_data/output_files/NY22_snyder_MSI_with_GDD_longer_GNDVI_NDVI_NDRE.csv") # longer version
+unique(ny22_sny$colNumber) # 1 to 51
+length(unique(ny22_sny$colNumber)) # to confirm its continuously from 1 to 51, yes, its 51
+unique(ny22_sny$replicate) # 1 to 4
+unique(ny22_sny$rowNumber) # 1 to 4
+
+# now lets rename the columns
+colnames(ny22_sny)
+ny22_sny <- ny22_sny %>% 
+  rename(Germplasm = germplasmName, Row = rowNumber, Range = colNumber, Plot = plotNumber, Rep = replicate )
+
+# From now we are making data file easier for analysis and modeling by pivot wider function for VI's and only necessary columns
+ny22_sny_wider <- ny22_sny %>%
+  mutate(doy = as.numeric(doy)) %>%
+  pivot_wider(
+    id_cols = c(Germplasm, Rep, Plot, Row, Range),  # select all necessary columns
+    names_from = c(trait, doy),
+    values_from = value,
+    names_sep = "_"
+  )
+NY_snyder_22_MSI <- ny22_sny_wider # this is the imaging data file
+unique(ny22_sny$doy) # 23 flights
+
+ ## saving this file
+write.csv(NY_snyder_22_MSI, file = "2022/MSI_data/output_files/NY_snyder_22_MSI.csv")
+
+# separating out VI's (NDVI, GNDVI, NDRE) as separate data file and save them.
+NY_snyder_22_MSI <- read.csv("2022/MSI_data/output_files/NY_snyder_22_MSI.csv")
+# NDVI columns
+ndvi_22 <- NY_snyder_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDVI_"))
+write.csv(ndvi_22, "2022/MSI_data/output_files/NY_snyder_22_NDVI.csv", row.names = FALSE)
+
+# NDRE columns
+ndre_22 <- NY_snyder_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("NDRE_"))
+write.csv(ndre_22, "2022/MSI_data/output_files/NY_snyder_22_NDRE.csv", row.names = FALSE)
+
+# GNDVI columns
+gndvi_22 <- NY_snyder_22_MSI %>%
+  select(Germplasm, Rep, Plot, Row, Range, starts_with("GNDVI"))
+write.csv(gndvi_22, "2022/MSI_data/output_files/NY_snyder_22_GNDVI.csv", row.names = FALSE)
+
+ ## checked all three files have same columns numbers
+
+unique(ny22_sny$Plot)
+gndvi_22$Plot # 204
+
+
+
+
+
+#2. Yield data: now lets work with yield data so we can merge MSI + yield
+ ## Rename MSI file to match with yield data file
+ny22_sny_yld <- read.csv("2022/GroundTruth_data/NY22_Snyder_yield_data.csv")
+colnames(ny22_sny_yld)
+
+ny22_sny_yld <- ny22_sny_yld %>% 
+  rename(Plot = plot, Rep = rep, Germplasm = cultivar.name) # Plot and Rep are already same as MSI data columns
+
+unique(ny22_sny_yld$Plot) # 144 (Yield plots or harvested trial)
+unique(ny22_sny$Plot) # 204 (MSI plots)
+
+
+# IMP !!!!!!!
+## looking at data files and layouts from imagebreed and harvest files
+ ### Only the 36 interior ranges (plots 113–148) are common across:
+###   -  MSI data
+###   - Harvest data
+# AND
+## MSI plot IDs are encoded (e.g., 2111010)
+## Extract the true plot number:
+## - Take digits corresponding to row–range → e.g., 101
+## - Match with yield file plot IDs (113–148)
+
+#Align datasets by reconstructing plot IDs and filtering to the 36 harvest plots (113–148) to ensure consistent spatial matching between MSI and yield data.
+
+# 3. Align MSI datasets
+
+ # 3.1. first make plot id three digit as in yield data
+ny22_sny_wider_clean_plot <- ny22_sny_wider %>%
+  mutate(
+    Plot = as.character(Plot),
+    Plot_clean = as.numeric(substr(Plot, 4, 6)))
+ 
+# 3.2. Then we can direclty join and filter plots that are in between 113-148, 213-248, 313-348, 413-448
+
+# 3: Join MSI with yield data
+ny22_sny_combined <- ny22_sny_wider_clean_plot %>%
+  inner_join(
+    ny22_sny_yld %>% 
+      rename(Plot_clean = Plot),
+    by = c("Plot_clean", "Rep")) # since germplasm are named differently (like capital letter and small)
+
+# yield file has 144 data and thus this combined also has same 144 data points. 
+# lets just move yield columns forward (but first rename and select correct plot numbers)
+ny22_sny_combined <- ny22_sny_combined %>%
+  rename(Germplasm = Germplasm.x) %>%
+  select(-Plot) %>%
+  rename(Plot = Plot_clean)
+ # now rearrange columns ( and removed germplasm.y, entry,)
+ny22_sny_combined <- ny22_sny_combined %>%
+   dplyr::select(
+    1:4,                          # Keep the first 5 columns as-is
+    74, # keep plot column
+    77:80,                   # Move columns 77 onward next
+    5:73)                     # Then include the NDRE/NDVI columns 
+ # double check all columns are looking fine and we have all MSI's and harvest columns along with Germplasm, Plot, Rep, Range, Row
+
+colnames(ny22_sny_combined)
+unique(ny22_sny_combined$Rep) # 1 2 3 4
+unique(ny22_sny_combined$Row) # 1 2 3 4
+unique(ny22_sny_combined$Range) # 36 ( from 16 to 51)
+unique(ny22_sny_combined$Germplasm) # 36 unique germplasm
+
+
+
+# perfect, the combined file looks great. 
+
+# thus combined file. now final file has Germplasm, Rep, Plot, Row, Rep, NDVI, GNDVI, NDRE, Yields But yields have . in its empty one, so replace with NA
+colnames(ny22_sny_combined)
+yield_traits <- c("yld1", "yld2", "yld3", "tot22")
+sapply(ny22_sny_combined[yield_traits], class) # if numeric, great. if not change to numeric
+ # export
+write.csv(ny22_sny_combined, file = "2022/MSI_data/output_files/NY22_Sny_combined_phenotypes_All_MSI.csv")
+
+# manually checked combined file with individual file and it worked.
+
+# now lets save files for each NDVI, NDRE and GNDVI
+# separating out NDVI, NDRE and GNDVI columns as separate data file and save them.
+
+gndvi22_sny <- ny22_sny_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22, starts_with("GNDVI_"))
+write.csv(gndvi22_sny, "2022/MSI_data/output_files/NY_snyder_22_GNDVI_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndre22_sny <- ny22_sny_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22, starts_with("NDRE_"))
+write.csv(ndre22_sny, "2022/MSI_data/output_files/NY_snyder_22_NDRE_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndvi22_sny <- ny22_sny_combined %>%
+  select(Germplasm, Rep, Plot, Row, Range,yld1, yld2, yld3, tot22, starts_with("NDVI_"))
+write.csv(ndvi22_sny, "2022/MSI_data/output_files/NY_snyder_22_NDVI_combined_MSI_Yield.csv", row.names = FALSE)
+```
+
+
+### Also add scaled yield columns in the data files (scaling yield to GNDVI level)
+Normally if the range of numbers vary a lot between vi's and yield, then we can scale yield to variance level of vi's. but here since yield is in lb and upto 2 digit, should have that issue. If got any, we can always use scaled yield.
+```{r scaling yield and adding to data file, Snyder 2022}
+# we only have to scale 3 harvest values based on GNDVI's value. Of course the variance between VI's differ but it should be okay to use Yield scaled onto GNDVI for analysis with NDRE and NDVI as well. 
+ny_sny_pheno_22 <- read.csv("2022/MSI_data/output_files/NY22_sny_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X)
+colnames(ny_sny_pheno_22)
+# Define the mapping of yield traits to GNDVI columns
+yield_traits <- paste0("yld", 1:3)
+GNDVI_times_sny_22 <- c("GNDVI_164", "GNDVI_207", "GNDVI_259") # selecting one of the time point in each harvest window. selecting last one
+
+# Loop over each yield trait
+for (i in 1:length(yield_traits)) {
+  
+  trait <- yield_traits[i]
+  GNDVI_col <- GNDVI_times_sny_22[i]
+  
+  # Calculate variance of GNDVI and yield
+  GNDVI_var <- var(ny_sny_pheno_22[[GNDVI_col]], na.rm = TRUE)
+  yld_var <- var(ny_sny_pheno_22[[trait]], na.rm = TRUE)
+  
+  # Calculate scaling factor
+  sf <- sqrt(GNDVI_var) / sqrt(yld_var)
+  
+  # Create new scaled yield column
+  new_col <- paste0("sca_", trait)
+  ny_sny_pheno_22[[new_col]] <- ny_sny_pheno_22[[trait]] * sf
+  
+  #  Print scaling factor
+  cat("Scaling factor for", trait, "using", GNDVI_col, ":", sf, "\n")
+}
+
+
+# thus all scaled yields are added as a new column at last. 
+
+# now rearrange columns ( bring scaled yield column earlier)
+ny_sny_pheno_22_rearranged <- ny_sny_pheno_22 %>%
+   dplyr::select(
+    1:9,                          # Keep the first 5 columns as-is
+    79:81, # keep plot column
+    10:78)                   # Move columns 77 onward next  
+
+
+# export
+write.csv(ny_sny_pheno_22_rearranged, file = "2022/MSI_data/output_files/Final_NY22_sny_combined_phenotypes_All_MSI.csv")
+
+# manually checked combined file with individual file and it worked.
+
+# now lets save files for each NDVI, NDRE and GNDVI
+# separating out NDVI, NDRE and GNDVI columns as separate data file and save them.
+
+gndvi22_sny <- ny_sny_pheno_22_rearranged %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22, sca_yld1, sca_yld2, sca_yld3, starts_with("GNDVI_"))
+write.csv(gndvi22_sny, "2022/MSI_data/output_files/Final_NY_Snyder_22_GNDVI_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndre22_sny <- ny_sny_pheno_22_rearranged %>%
+  select(Germplasm, Rep, Plot, Row, Range, yld1, yld2, yld3, tot22,sca_yld1, sca_yld2, sca_yld3, starts_with("NDRE_"))
+write.csv(ndre22_sny, "2022/MSI_data/output_files/Final_NY_Snyder_22_NDRE_combined_MSI_Yield.csv", row.names = FALSE)
+
+ndvi22_sny <- ny_sny_pheno_22_rearranged %>%
+  select(Germplasm, Rep, Plot, Row, Range,yld1, yld2, yld3, tot22, sca_yld1, sca_yld2, sca_yld3,starts_with("NDVI_"))
+write.csv(ndvi22_sny, "2022/MSI_data/output_files/Final_NY_Snyder_22_NDVI_combined_MSI_Yield.csv", row.names = FALSE)
+```
+
+
+
+
+
+Run a few simple models for sanity check
+```{r Run a few simple models for saniity check}
+colnames(ny22_sny_combined)
+model<-lmer(NDVI_159~1+Rep+(1|Germplasm),data=ny22_sny_combined)
+VarCorr(model) 
+# here std given, meaning variance is square of these
+0.004786^2/(0.004786^2+0.019083^2) # 0.1
+
+model_2<-lmer(GNDVI_259~1+Rep+(1|Germplasm),data=ny22_sny_combined)
+VarCorr(model_2) 
+0.0073938^2/(0.0073938^2+0.0192224^2) # 0.13
+vc <- as.data.frame(VarCorr(model_2)) # this directly gives variance component
+vc
+```
+
+
+
+# understanding data more for making experimental designs
+
+```{r Check row, range, rep, germplasm, plot counts}
+unique(ny22_sny_combined$Rep) # 1,2,3,4
+unique(ny22_sny_combined$Row) # 1  2  3  4  
+unique(ny22_sny_combined$Range) # 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51
+unique(ny22_sny_combined$Germplasm) # 36 unique
+unique(ny22_sny_combined$Plot) # 144 unique plots ( 36*4)
+```
+
+
+# check outliers for yield data
+```{r, check outliers for yield data}
+# Fit a linear model
+colnames(ny22_sny_combined)
+# Outliers in Yield 1
+model <- lm(yld1 ~ Rep+Row+Range+Germplasm, data = ny22_sny_combined, na.action = na.exclude) #model explains ~ 51% (R2= 51%)
+# now calculate residuals based on model
+
+# Calculate residuals
+ny22_sny_combined$residuals <- residuals(model, na.action = na.exclude)
+# Standardize the residuals
+ny22_sny_combined$residuals_standard <- scale(ny22_sny_combined$residuals, center = T, scale = T) 
+# Identify outliers
+outliers <- ny22_sny_combined %>% filter(abs(residuals_standard) > 3)
+# Print outliers
+View(outliers) # None
+
+hist(model$residuals) # looks normal so can use standarized residuals which follow a normal distribution.
+hist(ny22_sny_combined$residuals_standard) # looks normal but slightly skewed still can use standarized residuals which follow a normal distribution.
+hist(ny22_sny_combined$residuals) # looks normal but slightly skewed still can use standarized residuals which follow a normal distribution.
+
+
+
+# for all yields
+library(dplyr)
+library(purrr)
+
+# Traits
+yield_traits <- paste0("yld", 1:3)
+
+# Function to fit model, calculate residuals, standardize, and extract outliers
+process_outliers <- function(trait, data) {
+  # Build formula dynamically
+  formula <- as.formula(paste(trait, "~ Rep + Row + Range + Germplasm"))
+  
+  # Fit model
+  model <- lm(formula, data = data, na.action = na.exclude)
+  
+  # Gsny residuals and standardized residuals
+  data[[paste0(trait, "_resid")]] <- residuals(model, na.action = na.exclude)
+  data[[paste0(trait, "_resid_std")]] <- scale(data[[paste0(trait, "_resid")]], center = TRUE, scale = TRUE)
+  
+  # Extract outliers
+  outliers <- data %>% filter(abs(.data[[paste0(trait, "_resid_std")]]) > 3)
+  
+  return(outliers)
+}
+
+# Apply the function to all yield traits
+outlier_list <- map(yield_traits, ~process_outliers(.x, ny22_sny_combined))
+
+# Name the list elements for clarity
+names(outlier_list) <- yield_traits
+
+# View outliers for each trait
+View(outliers)
+# plot and standard residual value
+
+# for somsnyhing closer to 3 are judgement calls but over 3.5 or 4 can be removed. 
+# In this case, there is no outlier. 
+```
+
+
+MSI Range of values to check outliers
+```{r MSI Range of values to check outliers and sanity range check}
+colnames(ny22_sny_combined)
+library(dplyr)
+
+# Gsny column names of interest
+index_cols <- grep("^(GNDVI|NDVI|NDRE)_", colnames(ny22_sny_combined), value = TRUE)
+
+# Calculate min and max for each
+index_summary <- sapply(index_cols, function(col) {
+  vals <- ny22_sny_combined[[col]]
+  c(min = min(vals, na.rm = TRUE), max = max(vals, na.rm = TRUE))
+})
+
+# Convert to data frame
+index_summary_df <- as.data.frame(t(index_summary))
+index_summary_df$Index <- sub("_.*", "", rownames(index_summary_df))
+index_summary_df$Column <- rownames(index_summary_df)
+index_summary_df <- index_summary_df %>%
+  select(Index, Column, Min = min, Max = max)
+
+# View the result
+View(index_summary_df)
+
+#mean 
+
+index_summary_df %>%
+  group_by(Index) %>%
+  summarise(
+    Mean_Min = mean(Min, na.rm = TRUE),
+    Mean_Max = mean(Max, na.rm = TRUE)
+  )
+
+# A tibble: 3 × 3
+  Index Mean_Min Mean_Max
+  <chr>    <dbl>    <dbl>
+1 GNDVI    0.140    0.300
+2 NDRE     0.245    0.417
+3 NDVI     0.369    0.517
+```
+
+
+
+
+
+

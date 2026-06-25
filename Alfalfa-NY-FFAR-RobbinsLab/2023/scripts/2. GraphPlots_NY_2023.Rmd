@@ -1,0 +1,463 @@
+---
+title: "Plots (Raw heatmaps for sanity and data check)"
+author: "Dinesh Ghimire"
+date: "2024-04-08"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,etc..) particularly helpful. I'd be familar with those before using this script
+# List of required packages
+required_packages <- c("dplyr", "lme4", "tidyr", "ggplot2", "readxl", "viridis","grid", "gridExtra")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/dg663/FFAR-Alfalfa-NY-DG")
+```
+
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NY"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NY 
+#below is what I gsny when I call gsnywd. Just check to make sure that the root for this script is the base of the github project, somsnyimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa-NY-DG"
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If somsnyhing is misssing please lsny me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NY cultivars here. 
+# its same for 2022 and 2023 (cultivar list)
+```
+
+
+#NY 23
+
+
+# NY 23 Musgrave 
+## Now lets process "Musgrave"
+
+################################# Musgrave Trial ################################
+
+
+Lets look at how VI's (1st chunk) and yield (2nd chunk) traits look like. 
+```{r visualizing VI's in heatmaps Mus 2023}
+# read the final combined version of file and drop 1st unnecessary index column
+ny_mus_pheno_23 <- read.csv("2023/MSI_data/output_files/Final_NY23_mus_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X, -GNDVI_195, -NDVI_195, -NDRE_195)
+# need to convert into factors
+ny_mus_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_mus_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_mus_pheno_23) # to ensure
+# now we need to make heatmaps of each NDVI, NDRE, GNDVI separately. For that, at first, need to change into long format
+#first need to change into long format so that we can use it for ggplot2 and also select VI's
+
+ny_mus_long_all <- ny_mus_pheno_23 %>%
+  pivot_longer(cols = matches("^(NDVI|NDRE|GNDVI)_\\d+$"),
+               names_to = "Index_Time",
+               values_to = "Value") %>%
+  separate(Index_Time, into = c("Index", "Time"), sep = "_") %>%
+  mutate(Time = as.numeric(Time))  # Ensure Time is numeric for sorting
+
+# then since we need to create heatmaps for each VI's separately to observe each heatmaps with more resolution, lets separate out for each VI and do all
+# Subset each index
+ndvi_mus_data <- ny_mus_long_all %>% filter(Index == "NDVI")
+gndvi_mus_data <- ny_mus_long_all %>% filter(Index == "GNDVI")
+ndre_mus_data <- ny_mus_long_all %>% filter(Index == "NDRE")
+  # all three have same rows and checked back to merged file, the values look good.
+
+# Plot faceted heatmaps
+ # 1. for NDVI
+gg_ndvi_mus <- ggplot(ndvi_mus_data, aes(x = Row, y = Range, fill = Value)) +
+  geom_tile() +
+  scale_fill_viridis(option = "D", na.value = "grey90") +
+  facet_wrap(~Time, ncol = 8) +
+  labs(title = "NDVI Heatmaps Across Time NY Mus 2023",
+       x = "Row", y = "Range", fill = "NDVI") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+gg_ndvi_mus
+# save the file
+ggsave(filename = "Raw_NDVI_Heatmap_NY_Mus_2023.png", plot = gg_ndvi_mus, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+# 2. for GNDVI
+gg_gndvi_mus <- ggplot(gndvi_mus_data, aes(x = Row, y = Range, fill = Value)) +
+  geom_tile() +
+  scale_fill_viridis(option = "D", na.value = "grey90") +
+  facet_wrap(~Time, ncol = 8) +
+  labs(title = "GNDVI Heatmaps Across Time NY Mus 2023",
+       x = "Row", y = "Range", fill = "GNDVI") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+gg_gndvi_mus
+# save the file
+ggsave(filename = "Raw_GNDVI_Heatmap_NY_Mus_2023.png", plot = gg_gndvi_mus, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+
+# 3. for NDRE
+gg_ndre_mus <- ggplot(ndre_mus_data, aes(x = Row, y = Range, fill = Value)) +
+  geom_tile() +
+  scale_fill_viridis(option = "D", na.value = "grey90") +
+  facet_wrap(~Time, ncol = 8) +
+  labs(title = "NDRE Heatmaps Across Time NY Mus 2023",
+       x = "Row", y = "Range", fill = "NDRE") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+gg_ndre_mus
+# save the file
+ggsave(filename = "Raw_NDRE_Heatmap_NY_Mus_2023.png", plot = gg_ndre_mus, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+```
+
+
+*Plot the agronomic traits value i.e. yield here*
+
+```{r heatmap for sca_yield data Mus 2023}
+#for yield data
+ny_mus_pheno_23 <- read.csv("2023/MSI_data/output_files/Final_NY23_mus_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X)
+# need to convert into factors
+ny_mus_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_mus_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_mus_pheno_23) # to ensure
+
+#lets make this wide format to longer format
+ny_mus_pheno_23_yld_long <- gather(ny_mus_pheno_23, harvest, value, sca_yld1:sca_yld3) # !!! scaled yield
+
+ggplot(ny_mus_pheno_23_yld_long, aes(x=harvest, y = value)) +
+  geom_point()
+
+# now lets make complete heatmap
+gg_yld_heatmap_mus_23 <- ggplot(ny_mus_pheno_23_yld_long, aes(x = Row, y = Range, fill = value)) +
+  geom_tile() +
+scale_fill_gradientn(
+    colors = c("#0b3d2e", "#2e8b57", "#a6d96a", "#ffff80"),
+    na.value = "grey90"
+  ) +
+  facet_wrap(~harvest, ncol = 3) +
+  labs(title = "NY 23 Nor Yield Heatmaps (YLD1 to YLD6)", x = "Row", y = "Range") +
+  theme_minimal(base_size = 10) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6))
+
+gg_yld_heatmap_mus_23
+# save the file
+ggsave(filename = "Raw_Yields_Heatmap_NY_Mus_2023.png", plot = gg_yld_heatmap_mus_23, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+```
+
+
+
+
+
+### Compare NDVI, GNDVI, and NDRE mean values
+```{r Compare NDVI, GNDVI, and NDRE mean values Mus 2023}
+## ============================================================
+## Mean differences among vegetation indices
+## ============================================================
+
+mean_diffs_mus <- ny_mus_long_all %>%
+  filter(Index %in% c("NDVI", "NDRE", "GNDVI")) %>%
+  
+  group_by(Time, Index) %>%
+  summarise(
+    mean_value = mean(Value, na.rm = TRUE),
+    .groups = "drop") %>%
+  pivot_wider(names_from = Index, values_from = mean_value) %>%
+  arrange(Time)
+
+
+## ============================================================
+## Convert to long format for plotting
+## ============================================================
+
+mean_diffs_mus_long <- mean_diffs_mus %>%
+  select(Time, NDVI, GNDVI, NDRE) %>%
+  pivot_longer(
+    cols = -Time,
+    names_to = "Comparison",
+    values_to = "Difference")
+
+
+## ============================================================
+## Plot
+## ============================================================
+
+gg_diff <- ggplot(mean_diffs_mus_long, aes(x = Time, y = Difference, color = Comparison)) +
+  
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  
+  labs(
+    title = "Mean Differences Between Vegetation Indices Over Time (NY Mus 2023)",
+    x = "Time (DOY)",
+    y = "Mean Difference") +
+  theme_minimal() +
+  scale_color_manual(values = c(
+    "NDVI"  = "#1b9e77",
+    "GNDVI" = "#377eb8",
+    "NDRE" = "#d95f02"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold"))
+gg_diff
+
+
+## ============================================================
+## Save
+## ============================================================
+
+ggsave(
+  filename = "Compare_mean_VIs_NY_Mus_2023.png",
+  plot = gg_diff,
+  path = "2023/output_images",
+  width = 8,
+  height = 5,
+  dpi = 400)
+
+```
+
+
+
+
+
+
+Check previous scripts for genetic, mt, spatial graphs... 
+
+
+
+
+
+
+
+
+
+
+################################# SNYDER Trial, 2023 ################################
+
+
+
+Lets look at how VI's (1st chunk) and yield (2nd chunk) traits look like. 
+```{r visualizing VI's in heatmaps Sny 2023}
+# read the final combined version of file and drop 1st unnecessary index column
+ny_sny_pheno_23 <- read.csv("2023/MSI_data/output_files/Final_NY23_sny_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X)
+# need to convert into factors
+ny_sny_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_sny_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_sny_pheno_23) # to ensure
+# now we need to make heatmaps of each NDVI, NDRE, GNDVI separately. For that, at first, need to change into long format
+#first need to change into long format so that we can use it for ggplot2 and also select VI's
+
+ny_sny_long_all <- ny_sny_pheno_23 %>%
+  pivot_longer(cols = matches("^(NDVI|NDRE|GNDVI)_\\d+$"),
+               names_to = "Index_Time",
+               values_to = "Value") %>%
+  separate(Index_Time, into = c("Index", "Time"), sep = "_") %>%
+  mutate(Time = as.numeric(Time))  # Ensure Time is numeric for sorting
+
+# then since we need to create heatmaps for each VI's separately to observe each heatmaps with more resolution, lets separate out for each VI and do all
+# Subset each index
+ndvi_sny_data <- ny_sny_long_all %>% filter(Index == "NDVI")
+gndvi_sny_data <- ny_sny_long_all %>% filter(Index == "GNDVI")
+ndre_sny_data <- ny_sny_long_all %>% filter(Index == "NDRE")
+  # all three have same rows and checked back to merged file, the values look good.
+
+# Plot faceted heatmaps
+ # 1. for NDVI
+gg_ndvi_sny <- ggplot(ndvi_sny_data, aes(x = Row, y = Range, fill = Value)) +
+  geom_tile() +
+  scale_fill_viridis(option = "D", na.value = "grey90") +
+  facet_wrap(~Time, ncol = 8) +
+  labs(title = "NDVI Heatmaps Across Time NY Sny 2023",
+       x = "Row", y = "Range", fill = "NDVI") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+gg_ndvi_sny
+# save the file
+ggsave(filename = "Raw_NDVI_Heatmap_NY_Sny_2023.png", plot = gg_ndvi_sny, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+# 2. for GNDVI
+gg_gndvi_sny <- ggplot(gndvi_sny_data, aes(x = Row, y = Range, fill = Value)) +
+  geom_tile() +
+  scale_fill_viridis(option = "D", na.value = "grey90") +
+  facet_wrap(~Time, ncol = 8) +
+  labs(title = "GNDVI Heatmaps Across Time NY Sny 2023",
+       x = "Row", y = "Range", fill = "GNDVI") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+gg_gndvi_sny
+# save the file
+ggsave(filename = "Raw_GNDVI_Heatmap_NY_Sny_2023.png", plot = gg_gndvi_sny, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+
+# 3. for NDRE
+gg_ndre_sny <- ggplot(ndre_sny_data, aes(x = Row, y = Range, fill = Value)) +
+  geom_tile() +
+  scale_fill_viridis(option = "D", na.value = "grey90") +
+  facet_wrap(~Time, ncol = 8) +
+  labs(title = "NDRE Heatmaps Across Time NY Sny 2023",
+       x = "Row", y = "Range", fill = "NDRE") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+gg_ndre_sny
+# save the file
+ggsave(filename = "Raw_NDRE_Heatmap_NY_Sny_2023.png", plot = gg_ndre_sny, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+```
+
+
+*Plot the agronomic traits value i.e. yield here*
+
+```{r heatmap for sca_yield data Sny 2023}
+#for yield data
+ny_sny_pheno_23 <- read.csv("2023/MSI_data/output_files/Final_NY23_sny_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X)
+# need to convert into factors
+ny_sny_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_sny_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_sny_pheno_23) # to ensure
+
+#lets make this wide format to longer format
+ny_sny_pheno_23_yld_long <- gather(ny_sny_pheno_23, harvest, value, sca_yld1:sca_yld3) # !!! scaled yield
+
+ggplot(ny_sny_pheno_23_yld_long, aes(x=harvest, y = value)) +
+  geom_point()
+
+# now lets make complete heatmap
+gg_yld_heatmap_sny_23 <- ggplot(ny_sny_pheno_23_yld_long, aes(x = Row, y = Range, fill = value)) +
+  geom_tile() +
+scale_fill_gradientn(
+    colors = c("#0b3d2e", "#2e8b57", "#a6d96a", "#ffff80"),
+    na.value = "grey90"
+  ) +
+  facet_wrap(~harvest, ncol = 3) +
+  labs(title = "NY 23 Nor Yield Heatmaps (YLD1 to YLD6)", x = "Row", y = "Range") +
+  theme_minimal(base_size = 10) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(size = 6),
+        axis.text.y = element_text(size = 6))
+
+gg_yld_heatmap_sny_23
+# save the file
+ggsave(filename = "Raw_Yields_Heatmap_NY_sny_2023.png", plot = gg_yld_heatmap_sny_23, path = "2023/output_images", width = 15, height = 12,dpi = 400)
+
+```
+
+
+
+
+
+### Compare NDVI, GNDVI, and NDRE mean values
+```{r Compare NDVI, GNDVI, and NDRE mean values Sny 2023}
+## ============================================================
+## Mean differences among vegetation indices
+## ============================================================
+
+mean_diffs_sny <- ny_sny_long_all %>%
+  filter(Index %in% c("NDVI", "NDRE", "GNDVI")) %>%
+  
+  group_by(Time, Index) %>%
+  summarise(
+    mean_value = mean(Value, na.rm = TRUE),
+    .groups = "drop") %>%
+  pivot_wider(names_from = Index, values_from = mean_value) %>%
+  arrange(Time)
+
+
+## ============================================================
+## Convert to long format for plotting
+## ============================================================
+
+mean_diffs_sny_long <- mean_diffs_sny %>%
+  select(Time, NDVI, GNDVI, NDRE) %>%
+  pivot_longer(
+    cols = -Time,
+    names_to = "Comparison",
+    values_to = "Difference")
+
+
+## ============================================================
+## Plot
+## ============================================================
+
+gg_diff <- ggplot(mean_diffs_sny_long, aes(x = Time, y = Difference, color = Comparison)) +
+  
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  
+  labs(
+    title = "Mean Differences Between Vegetation Indices Over Time (NY Sny 2023)",
+    x = "Time (DOY)",
+    y = "Mean Difference") +
+  theme_minimal() +
+  scale_color_manual(values = c(
+    "NDVI"  = "#1b9e77",
+    "GNDVI" = "#377eb8",
+    "NDRE" = "#d95f02"
+  )) +
+  theme(
+    legend.title = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold"))
+gg_diff
+
+
+## ============================================================
+## Save
+## ============================================================
+
+ggsave(
+  filename = "Compare_mean_VIs_NY_sny_2023.png",
+  plot = gg_diff,
+  path = "2023/output_images",
+  width = 8,
+  height = 5,
+  dpi = 400)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1419 @@
+_---
+title: "Running univariate models with GRM and spatial to calculate Heritability_ASReml"
+author: "Dinesh Ghimire"
+date: "2026-05-12"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r Libraries}
+# packages required for analysis. I rely on the dplyr/tidyr a lot as I find the grouping (group_by,etc..) particularly helpful. I'd be familiar with those before using this script
+# List of required packages
+required_packages <- c("dplyr","asreml", "readxl", "tidyr", "ggplot2", "reshape2","data.table", "viridis","grid", "gridExtra", "GGally")
+
+# Function to install/load packages
+install_and_load <- function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# Apply to all required packages
+invisible(sapply(required_packages, install_and_load))
+```
+
+#Git and R project connection
+```{r Connecting with GitHub}
+#all of this operates within the github project "FFAR-Alfalfa-NY-DG"
+#https://github.com/dineshghimire01/FFAR-Alfalfa-NY-DG 
+#below is what I get when I call getwd. Just check to make sure that the root for this script is the base of the github project, sometimes it will move to where this file is directly located in "scripts/processing" which you don't want. 
+# "/Users/dg663/FFAR-Alfalfa-NY-DG"
+getwd()
+#below is a kind of master list for all the germplasmName, entry numbers, and genotype ids. If something is misssing please let me know. 
+key<-read.csv("2022/meta_data/cultivar_list_key.csv") # contains both CU and NY cultivars here. 
+# its same for 2023 and 2023 (cultivar list)
+```
+
+
+
+
+#NY 22
+
+
+################################# Musgrave Trial ################################
+
+
+
+1. *NY Musgrave 2023 *
+
+Loading and preparing data files
+```{r loading files 05122026}
+#import merged phenotype file 
+ny_mus_pheno_23 <- read.csv("2023/MSI_data/output_files/Final_NY23_Mus_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X) # remove index column
+
+# need to convert into factors
+ny_mus_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_mus_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_mus_pheno_23) 
+str(ny_mus_pheno_23)
+
+
+#import genotype file
+grm_aa_ny<- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1, check.names = FALSE)
+grm_aa_ny  <- as.matrix(grm_aa_ny)
+mean(diag(grm_aa_ny )) # 1
+hist(diag(grm_aa_ny ))
+
+grm_agh <- grm_aa_ny +diag(.0005,length(grm_aa_ny [,1]),length(grm_aa_ny [,1])) # adding 0.05 nugget/ridge to ensure matrix is strictly positive definite
+grm_inverse <- solve(grm_agh)
+
+```
+
+
+- Scaling and outlier check on yield already done in script1, so we can jump into running models
+
+
+Run the models
+VI's
+## 125, 136, 144, 150, 152, 156, 164, 166, 172, 177, 179, 186, 192, 195, 198, 213, 223, 228, 244, 248, 251, 255, 263, 274, 278, 300, 305
+ # but 3rd harvest was in 255 Julian day meaning after that were flights after all harvests done for that season. Thus, for spatial study to fit RR, we don't need flights after 3rd harvest. So not using 263, 274, 278, 300, 305.
+# Final flights upto 3rd harvest:
+## 125, 136, 144, 150, 152, 156, 164, 166, 172, 177, 179, 186, 192, 195, 198, 213, 223, 228, 244, 248, 251, 255
+ # we have 22 imaging events so 22 heritabilities here. 
+
+
+```{r run univariate models with spatial and GRM 05122026}
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+colnames(ny_mus_pheno_23) 
+
+# first for NDVI
+# Final flights upto 3rd harvest:
+## 125, 136, 144, 150, 152, 156, 164, 166, 172, 177, 179, 186, 192, 195, 198, 213, 223, 228, 244, 248, 251, 255
+ # we have 22 imaging events so 22 heritabilities here.
+
+#  For NDVI_136
+st_NY23_mus_ndvi_136 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_136 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndvi_136)$varcomp
+
+asreml::vpredict(st_NY23_mus_ndvi_136, heritA ~ V1 / (V1 + V5)) # 0.3829762 with 0.1366314
+
+```
+
+
+
+For yield 
+
+```{r Heritability of yield with GRM 05122026}
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+# for yield 1: 0.99 (spatial vc consumes residual)
+st_NY23_mus_yld1 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld1 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_yld1)$varcomp
+asreml::vpredict(st_NY23_mus_yld1, heritA ~ V1 / (V1 + V5)) # 0.99 with 0.0012 SE
+
+
+# for yield 2
+st_NY23_mus_yld2 <- {    
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_yld2)$varcomp
+asreml::vpredict(st_NY23_mus_yld2, heritA ~ V1 / (V1 + V5)) # 0.5853671 with 0.09204607 SE
+
+
+# for yield 3
+st_NY23_mus_yld3 <- {    
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_yld3)$varcomp
+asreml::vpredict(st_NY23_mus_yld3, heritA ~ V1 / (V1 + V5)) # 0.7050828 with 0.09158598 SE
+
+```
+
+
+
+
+
+# Run for all VI's
+### STORE BOTH HERITABILITY AND VARIANCE COMPONENTS
+
+ To check variance components as well: store VC in another data frame
+```{r For all VI's 05122026}
+asreml.options(extra=300,maxit =300) # to setup more iterations for successful burn-in or convergence
+# 125, 136, 144, 150, 152, 156, 164, 166, 172, 177, 179, 186, 192, 195, 198, 213, 223, 228, 244, 248, 251, 255
+# Define time points
+times_mus_23 <- c(125, 136, 144, 150, 152, 156, 164, 166, 172, 177, 179, 186, 192, 195, 198, 213, 223, 228, 244, 248, 251, 255)
+
+# Initialize heritability results
+herit_results <- data.frame(
+  Time = times_mus_23,
+  Herit_ndvi = NA, Herit_ndvi_spa = NA,
+  Herit_gndvi = NA, Herit_gndvi_spa = NA,
+  Herit_ndre = NA, Herit_ndre_spa = NA)
+
+# Initialize variance component storage
+varcomp_results <- data.frame(
+  Time = numeric(0),
+  Index = character(0),
+  Model = character(0),
+  Component = character(0),
+  Estimate = numeric(0),
+  stringsAsFactors = FALSE)
+
+# Function to fit model and return heritability and variance components
+fit_heritability <- function(index_prefix, time_point, data) {
+  col_name <- paste0(index_prefix, "_", time_point)
+  
+  if (!col_name %in% colnames(data)) {
+    warning(paste("Column", col_name, "not found. Skipping."))
+    return(list(h2 = c(NA, NA), vc = NULL))
+  }
+  
+  # --- Simple Model ---
+  mod_simple <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 + Rep")),
+           random = ~ vm(Germplasm, grm_inverse),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Simple model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_simple <- NA
+  vc_simple <- NULL
+  if (!is.null(mod_simple)) {
+    h2_simple <- tryCatch({
+      vpredict(mod_simple, herit ~ V1 / (V1 + V2))$Estimate
+    }, error = function(e) NA)
+    
+    vc_simple <- tryCatch({
+      vc <- summary(mod_simple)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Simple")
+    }, error = function(e) NULL)
+  }
+  
+  # --- Spatial Model ---
+  mod_spatial <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 ")),
+           random = ~ vm(Germplasm, grm_inverse) + ar1(Range):ar1(Row),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Spatial model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_spatial <- NA
+  vc_spatial <- NULL
+  if (!is.null(mod_spatial)) {
+    h2_spatial <- tryCatch({
+      vpredict(mod_spatial, herit_spatial ~ V1 / (V1 + V5))$Estimate
+    }, error = function(e) NA)
+    
+    vc_spatial <- tryCatch({
+      vc <- summary(mod_spatial)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Spatial")
+    }, error = function(e) NULL)
+  }
+
+  return(list(h2 = c(h2_simple, h2_spatial),
+              vc = rbind(vc_simple, vc_spatial)))
+}
+
+# Loop through all time points and indices
+for (i in seq_along(times_mus_23)) {
+  time <- times_mus_23[i]
+  cat("\nProcessing time point:", time, "\n")
+  
+  for (index in c("NDVI", "GNDVI", "NDRE")) {
+    result <- fit_heritability(index, time, ny_mus_pheno_23)
+    
+    # Store heritabilities
+    herit_results[i, paste0("Herit_", tolower(index))] <- result$h2[1]
+    herit_results[i, paste0("Herit_", tolower(index), "_spa")] <- result$h2[2]
+    
+    # Store variance components
+    if (!is.null(result$vc)) {
+      result$vc$Index <- index
+      result$vc$Time <- time
+      varcomp_results <- bind_rows(varcomp_results, result$vc)
+    }
+  }
+}
+
+# Round heritability results to 2 decimals
+herit_results_mus_23 <- herit_results %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+# Done!
+print(head(herit_results_mus_23))
+print(head(varcomp_results))
+View(herit_results_mus_23)
+```
+
+
+check for NA's or 1 or 0.99 too
+- NDVI with spatial: 152, 195, 244, 248
+- GNDVI with spatial: 136, 144, 164, 166, 172, 195, 223, 228, 244, 248, 255
+- NDRE with spatial: 152, 156, 177, 213, 248
+
+### NDVI with spatial: 152, 195, 244, 248
+```{r NDVI Checking, 05122026}
+# NDVI: 152, 0.99 ( spatial borrowed from residual)
+st_NY23_mus_ndvi_152 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_152 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndvi_152)$varcomp
+asreml::vpredict(st_NY23_mus_ndvi_152, heritA ~ V1 / (V1 + V5)) # 0.99
+
+# NDVI: 195, almost none = 0
+st_NY23_mus_ndvi_195 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_195 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndvi_195)$varcomp
+asreml::vpredict(st_NY23_mus_ndvi_195, heritA ~ V1 / (V1 + V5)) # 
+
+# NDVI: 244, 0.99 ( spatial borrowed from residual)
+st_NY23_mus_ndvi_244 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_244 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndvi_244)$varcomp
+asreml::vpredict(st_NY23_mus_ndvi_244, heritA ~ V1 / (V1 + V5)) # 
+
+# NDVI: 248,  0.28(row) 
+st_NY23_mus_ndvi_248 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_248 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndvi_248)$varcomp
+asreml::vpredict(st_NY23_mus_ndvi_248, heritA ~ V1 / (V1 + V5)) # 
+```
+
+
+
+### GNDVI with spatial: 136, 144, 164, 166, 172, 195, 223, 228, 244, 248, 255
+
+```{r GNDVI Checking for cleaning, 05072026}
+# GNDVI with spatial: 136, 144, 164, 166, 172, 195, 223, 228, 244, 248, 255 
+# GNDVI: 136, 0.35. (row only)
+st_NY23_mus_gndvi_136 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_136 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_136)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_136, heritA ~ V3 / (V3 + V4)) # 0.3463901
+
+# GNDVI: 144, 0.99 (spatial took all residual)
+st_NY23_mus_gndvi_144 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_144 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_144)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_144, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 164, 0.99 (spatial took all residual)
+st_NY23_mus_gndvi_164 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_164 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_164)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_164, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 166, 0.99 (spatial took all residual)
+st_NY23_mus_gndvi_166 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_166 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_166)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_166, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 172, 0.99 (spatial took all residual)
+st_NY23_mus_gndvi_172 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_172 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_172)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_172, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 195, 0.98 (spatial took all residual)
+st_NY23_mus_gndvi_195 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_195 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_195)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_195, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 223, 0.43 (row)
+st_NY23_mus_gndvi_223 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_223 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_223)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_223, heritA ~ V3 / (V3 + V4)) # 
+
+# GNDVI: 228, 0.99 (spatial took all residual)
+st_NY23_mus_gndvi_228 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_228 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_228)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_228, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 244, 0.99 (spatial took all residual)
+st_NY23_mus_gndvi_244 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_244 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_244)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_244, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 248, almost none : 0.1 (row) - check with mt (checked fint, so ran full model here, 0.99 h2)
+st_NY23_mus_gndvi_248 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_248 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_248)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_248, heritA ~ V1 / (V1 + V5)) # 
+
+# GNDVI: 255, 0.99 (both) - check with mt model cz only row is less
+st_NY23_mus_gndvi_255 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_255 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_gndvi_255)$varcomp
+asreml::vpredict(st_NY23_mus_gndvi_255, heritA ~ V1 / (V1 + V5)) #
+asreml::vpredict(st_NY23_mus_gndvi_255, heritA ~ V3 / (V3 + V4)) # 
+
+```
+
+
+
+### NDRE with spatial: 152, 156, 177, 213, 248
+```{r NDRE Checking, 05112026}
+## NDRE with spatial: 152, 156, 177, 213, 248
+# NDRE: 152, almost none = 0
+st_NY23_mus_ndre_152 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_152 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndre_152)$varcomp
+asreml::vpredict(st_NY23_mus_ndre_152, heritA ~ V3 / (V3 + V4)) # 
+
+# NDRE: 156, 0.98
+st_NY23_mus_ndre_156 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_156 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndre_156)$varcomp
+asreml::vpredict(st_NY23_mus_ndre_156, heritA ~ V1 / (V1 + V5)) # 
+
+# NDRE: 177, 0.99 ( spatial took all of residual)
+st_NY23_mus_ndre_177 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_177 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndre_177)$varcomp
+asreml::vpredict(st_NY23_mus_ndre_177, heritA ~ V1 / (V1 + V5)) # 
+
+# NDRE: 213, almost none = 0 (full and row only both)
+st_NY23_mus_ndre_213 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_213 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndre_213)$varcomp
+asreml::vpredict(st_NY23_mus_ndre_213, heritA ~ V1 / (V1 + V5)) # 
+
+# NDRE: 248, almost none = 0
+st_NY23_mus_ndre_248 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_248 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = ny_mus_pheno_23)}
+summary(st_NY23_mus_ndre_248)$varcomp
+asreml::vpredict(st_NY23_mus_ndre_248, heritA ~ V1 / (V1 + V5)) # 
+```
+
+
+
+
+
+
+## make box plot to visulaize and compare 
+
+```{r Box plot to visualize heritability, Mus_23}
+herit_results_mus_23 <- read.csv("2023/MSI_data/output_files/Heritabilities_withGRM_NY_Musgrave_23.csv", sep = ",") 
+colnames(herit_results_mus_23)
+
+# Reshape all six heritability columns to long format
+herit_results_mus_23_long_all <- herit_results_mus_23 %>%
+  select(Time, h2_ndvi, h2_ndvi_spa,
+               h2_gndvi, h2_gndvi_spa,
+               h2_ndre, h2_ndre_spa) %>%
+  pivot_longer(cols = -Time, names_to = "Type", values_to = "Heritability") %>%
+  mutate(
+    Index = case_when(
+  grepl("gndvi", Type) ~ "GNDVI",
+  grepl("ndvi", Type) ~ "NDVI",
+  grepl("ndre", Type) ~ "NDRE"
+),
+    Model = ifelse(grepl("_spa", Type), "Spatial", "Simple"))
+
+
+gg_mus_23 <- ggplot(herit_results_mus_23_long_all, aes(x = Index, y = Heritability, fill = Index)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.4, color = "black") + # Randomly "jitter" (spread out) the data points horizontally by up to ±0.2 units on the x-axis (i.e., within each box)
+  # alternate geom_point() where all will be stacked in a vertical line so overalp issue.
+  facet_wrap(~ Model) +
+  labs(title = "h² by VI and Model Type in Musgrave NY 2023",
+       x = "Vegetation Index",
+       y = "Heritability (h²)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  ylim(c(0,1)) +
+  scale_fill_brewer(palette = "Set2")
+
+gg_mus_23
+
+ggsave(filename = "Boxplot_Heritability_h2_VI_NY_Musgrave_2023.png", plot = gg_mus_23, path = "2023/output_images", width = 8, height = 7,dpi = 400)
+
+
+############# Only simple h2 #######
+
+# make boxplot of h2_ndvi, h2_gndvi, h2_ndre ( not spatial ones)
+
+# Reshape only non-spatial heritability columns
+herit_results_mus_23_long_simple <- herit_results_mus_23 %>%
+  select(Time, h2_ndvi, h2_gndvi, h2_ndre) %>%
+  pivot_longer(
+    cols = -Time,
+    names_to = "Type",
+    values_to = "Heritability") %>%
+  mutate(
+    Index = case_when(
+      Type == "h2_ndvi"  ~ "NDVI",
+      Type == "h2_gndvi" ~ "GNDVI",
+      Type == "h2_ndre"  ~ "NDRE"))
+
+# Boxplot
+gg_mus_23_simple <- ggplot(
+  herit_results_mus_23_long_simple,
+  aes(x = Index, y = Heritability, fill = Index)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.4, color = "black") +
+  labs(
+    title = "h² by Vegetation Index in Musgrave NY 2023",
+    x = "Vegetation Index",
+    y = "Heritability (h²)" ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  ylim(0, 1) +
+  scale_fill_brewer(palette = "Set2")
+
+gg_mus_23_simple
+
+ggsave(filename = "Boxplot_Heritability_h2_VI_NY_Musgrave_2023_Simple_only.png",plot = gg_mus_23_simple,path = "2023/output_images",width = 7,height = 6,dpi = 400)
+
+```
+
+
+
+
+
+
+################################# Snyder Trial ################################
+
+
+
+
+1. *NY Snyder 2023 *
+
+Loading and preparing data files
+```{r loading files 05132026}
+#import merged phenotype file 
+ny_sny_pheno_23 <- read.csv("2023/MSI_data/output_files/Final_NY23_Sny_combined_phenotypes_All_MSI.csv")  %>%
+  select(-X) # remove index column
+
+# need to convert into factors
+ny_sny_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")] <- lapply(ny_sny_pheno_23[, c("Range", "Rep","Germplasm","Plot", "Row")], as.factor)
+colnames(ny_sny_pheno_23) 
+str(ny_sny_pheno_23)
+
+
+#import genotype file
+grm_aa_ny<- read.csv("2022/genotype_data/grm_final.csv", sep = ",", row.names = 1, check.names = FALSE)
+grm_aa_ny  <- as.matrix(grm_aa_ny)
+mean(diag(grm_aa_ny )) # 1
+hist(diag(grm_aa_ny ))
+
+grm_agh <- grm_aa_ny +diag(.0005,length(grm_aa_ny [,1]),length(grm_aa_ny [,1])) # adding 0.05 nugget/ridge to ensure matrix is strictly positive definite
+grm_inverse <- solve(grm_agh)
+
+```
+
+
+- Scaling and outlier check on yield already done in script1, so we can jump into running models
+
+
+Run the models
+VI's
+### 125, 142, 145, 150, 152, 156, 164, 166, 172, 178, 184, 187, 193, 198, 213, 223, 228, 251, 255, 265, 277, 300, 306
+ # but 3rd harvest was in 250th Julian day meaning after that were flights after all harvests done for that season. Thus, for spatial study to fit RR, we don't need flights after 3rd harvest. So not using 251, 255, 265, 277, 300, 306
+# Final flights upto 3rd harvest:
+### 125, 142, 145, 150, 152, 156, 164, 166, 172, 178, 184, 187, 193, 198, 213, 223, 228
+ # we have 17 imaging events so 17 heritabilities here. 
+
+
+```{r run univariate models with spatial and GRM 05122026}
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+colnames(ny_sny_pheno_23) 
+
+# first for NDVI
+# we have 23 imaging events so 23 heritabilities here. 
+### 125, 142, 145, 150, 152, 156, 164, 166, 172, 178, 184, 187, 193, 198, 213, 223, 228
+#  For NDVI_145
+st_ny23_sny_ndvi_145 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_145 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Range):ar1(Row),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_ny23_sny_ndvi_145)$varcomp
+
+asreml::vpredict(st_ny23_sny_ndvi_145, heritA ~ V1 / (V1 + V5)) # 0.72 with 0.11
+
+```
+
+
+
+For yield 
+
+```{r Heritability of yield with GRM 05132026}
+
+asreml.options(extra=200,maxit =200) # to setup more iterations for successful burn-in or convergence
+# for yield 1
+st_ny23_sny_yld1 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld1 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld1)$varcomp
+asreml::vpredict(st_ny23_sny_yld1, heritA ~ V1 / (V1 + V5)) # 0.7271587 with 0.11 se
+
+
+# for yield 2
+st_ny23_sny_yld2 <- {    
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld2 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld2)$varcomp
+asreml::vpredict(st_ny23_sny_yld2, heritA ~ V1 / (V1 + V5)) # 0.7529702 with 0.11 SE
+
+
+# for yield 3
+st_ny23_sny_yld3 <- {    
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = yld3 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld3)$varcomp
+asreml::vpredict(st_ny23_sny_yld3, heritA ~ V1 / (V1 + V5)) # 0.6835125 with 0.09 SE
+```
+
+
+
+
+
+# Run for all VI's
+### STORE BOTH HERITABILITY AND VARIANCE COMPONENTS
+
+ To check variance components as well: store VC in another data frame
+```{r For all VI's 05132026}
+asreml.options(extra=300,maxit =300) # to setup more iterations for successful burn-in or convergence
+# 125, 142, 145, 150, 152, 156, 164, 166, 172, 178, 184, 187, 193, 198, 213, 223, 228
+# Define time points
+times_sny_23 <- c(125, 142, 145, 150, 152, 156, 164, 166, 172, 178, 184, 187, 193, 198, 213, 223, 228)
+
+# Initialize heritability results
+herit_results <- data.frame(
+  Time = times_sny_23,
+  Herit_ndvi = NA, Herit_ndvi_spa = NA,
+  Herit_gndvi = NA, Herit_gndvi_spa = NA,
+  Herit_ndre = NA, Herit_ndre_spa = NA)
+
+# Initialize variance component storage
+varcomp_results <- data.frame(
+  Time = numeric(0),
+  Index = character(0),
+  Model = character(0),
+  Component = character(0),
+  Estimate = numeric(0),
+  stringsAsFactors = FALSE)
+
+# Function to fit model and return heritability and variance components
+fit_heritability <- function(index_prefix, time_point, data) {
+  col_name <- paste0(index_prefix, "_", time_point)
+  
+  if (!col_name %in% colnames(data)) {
+    warning(paste("Column", col_name, "not found. Skipping."))
+    return(list(h2 = c(NA, NA), vc = NULL))
+  }
+  
+  # --- Simple Model ---
+  mod_simple <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 + Rep")),
+           random = ~ vm(Germplasm, grm_inverse),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Simple model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_simple <- NA
+  vc_simple <- NULL
+  if (!is.null(mod_simple)) {
+    h2_simple <- tryCatch({
+      vpredict(mod_simple, herit ~ V1 / (V1 + V2))$Estimate
+    }, error = function(e) NA)
+    
+    vc_simple <- tryCatch({
+      vc <- summary(mod_simple)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Simple")
+    }, error = function(e) NULL)
+  }
+  
+  # --- Spatial Model ---
+  mod_spatial <- tryCatch({
+    attr(grm_inverse, "INVERSE") <- TRUE
+    asreml(fixed = as.formula(paste0(col_name, " ~ 1 ")),
+           random = ~ vm(Germplasm, grm_inverse) + ar1(Range):ar1(Row),
+           residual = ~ id(units),
+           data = data)
+  }, error = function(e) {
+    warning(paste("Spatial model failed for", col_name))
+    return(NULL)
+  })
+  
+  h2_spatial <- NA
+  vc_spatial <- NULL
+  if (!is.null(mod_spatial)) {
+    h2_spatial <- tryCatch({
+      vpredict(mod_spatial, herit_spatial ~ V1 / (V1 + V5))$Estimate
+    }, error = function(e) NA)
+    
+    vc_spatial <- tryCatch({
+      vc <- summary(mod_spatial)$varcomp
+      data.frame(Component = rownames(vc), Estimate = vc[, "component"], Model = "Spatial")
+    }, error = function(e) NULL)
+  }
+
+  return(list(h2 = c(h2_simple, h2_spatial),
+              vc = rbind(vc_simple, vc_spatial)))
+}
+
+# Loop through all time points and indices
+for (i in seq_along(times_sny_23)) {
+  time <- times_sny_23[i]
+  cat("\nProcessing time point:", time, "\n")
+  
+  for (index in c("NDVI", "GNDVI", "NDRE")) {
+    result <- fit_heritability(index, time, ny_sny_pheno_23)
+    
+    # Store heritabilities
+    herit_results[i, paste0("Herit_", tolower(index))] <- result$h2[1]
+    herit_results[i, paste0("Herit_", tolower(index), "_spa")] <- result$h2[2]
+    
+    # Store variance components
+    if (!is.null(result$vc)) {
+      result$vc$Index <- index
+      result$vc$Time <- time
+      varcomp_results <- bind_rows(varcomp_results, result$vc)
+    }
+  }
+}
+
+# Round heritability results to 2 decimals
+herit_results_sny_23 <- herit_results %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+# Done!
+print(head(herit_results_sny_23))
+# print(head(varcomp_results))
+View(herit_results_sny_23)
+
+```
+
+
+
+check for NA's or 1 or 0.99 too
+- NDVI with spatial: 125, 150, 152, 156, 166, 184, 187, 193, 223
+- GNDVI with spatial: 125, 142, 145,150, 152, 156, 166, 178, 184, 187, 193, 213, 223, 228
+- NDRE with spatial: 164, 184, 187
+
+
+### NDVI with spatial: 125, 150, 152, 156, 166, 184, 187, 193, 223
+
+```{r Checking NDVI for h2 confirmation, 05132026}
+# NDVI: 125, 0.99 ( spatial borrowed from residual), ran without grm to double check if the convergence is real
+st_NY23_sny_ndvi_125 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_125 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_125)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_125, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# NDVI: 150, 0.97 ( spatial borrowed from residual), ran without grm
+st_NY23_sny_ndvi_150 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_150 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_150)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_150, heritA ~ V1 / (V1 + V5)) # 0.97
+
+
+# NDVI: 152, 0.99 ( spatial borrowed from residual), but check with mt cz not converged
+st_NY23_sny_ndvi_152 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_152 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_152)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_152, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# NDVI: 156, no gen varaince
+st_NY23_sny_ndvi_156 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_156 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_156)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_156, heritA ~ V1 / (V1 + V5)) #
+
+
+# NDVI: 166, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_ndvi_166 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_166 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_166)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_166, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# NDVI: 184, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_ndvi_184 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_184 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_184)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_184, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# NDVI: 187, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_ndvi_187 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_187 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_187)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_187, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# NDVI: 193, 0.96 ( spatial borrowed from residual), similar high without grm
+st_NY23_sny_ndvi_193 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_193 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_193)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_193, heritA ~ V1 / (V1 + V5)) # 0.96
+
+
+# NDVI: 223, 0.99 ( spatial borrowed from residual).. double check with mt
+st_NY23_sny_ndvi_223 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDVI_223 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndvi_223)$varcomp
+asreml::vpredict(st_NY23_sny_ndvi_223, heritA ~ V1 / (V1 + V5)) # 0.99
+
+```
+
+
+
+
+### GNDVI with spatial: 125, 142, 145,150, 152, 156, 166, 178, 184, 187, 193, 213, 223, 228
+```{r Checking GNDVI for h2 confirmation, 05132026}
+# GNDVI: 125, 0.99 ( spatial borrowed from residual), double check with mt cz its bound
+st_NY23_sny_gndvi_125 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_125 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_125)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_125, heritA ~ V1 / (V1 + V5)) # 0.99
+
+# GNDVI: 142, 0.99 ( spatial borrowed from residual), double check with mt cz its bound
+st_NY23_sny_gndvi_142 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_142 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_142)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_142, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 145, 0.99 ( spatial borrowed from residual), , double check with mt cz its bound
+st_NY23_sny_gndvi_145 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_145 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_145)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_145, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 150, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_gndvi_150 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_150 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_150)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_150, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 152, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_gndvi_152 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_152 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_152)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_152, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 156, 0.91 ( spatial borrowed from residual)
+st_NY23_sny_gndvi_156 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_156 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_156)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_156, heritA ~ V1 / (V1 + V5)) # 0.91
+
+
+# GNDVI: 166, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_gndvi_166 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_166 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_166)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_166, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 178, 0.99 ( spatial borrowed from residual), double check with mt cz genetic effect is bound
+st_NY23_sny_gndvi_178 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_178 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_178)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_178, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 184, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_gndvi_184 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_184 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_184)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_184, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 187, 0.99 ( spatial borrowed from residual), double check with mt cz genetic effect is bound
+st_NY23_sny_gndvi_187 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_187 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_187)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_187, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 193, 0.99 ( spatial borrowed from residual), double check with mt cz genetic effect is bound
+st_NY23_sny_gndvi_193 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_193 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_193)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_193, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 213, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_gndvi_213 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_213 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_213)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_213, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 223, 0.99 ( spatial borrowed from residual), not converged so double check with mt models
+st_NY23_sny_gndvi_223 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_223 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_223)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_223, heritA ~ V1 / (V1 + V5)) # 0.99
+
+
+# GNDVI: 228, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_gndvi_228 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = GNDVI_228 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_gndvi_228)$varcomp
+asreml::vpredict(st_NY23_sny_gndvi_228, heritA ~ V1 / (V1 + V5)) # 0.99
+
+```
+
+
+
+###  NDRE with spatial: 164, 184, 187
+```{r Checking NDRE for h2 confirmation, 05132026}
+# NDRE: 164, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_ndre_164 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_164 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndre_164)$varcomp
+asreml::vpredict(st_NY23_sny_ndre_164, heritA ~ V1 / (V1 + V5)) # 0.99
+
+# NDRE: 184, 0.99 ( spatial borrowed from residual), double check with mt models cz its bound
+st_NY23_sny_ndre_184 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_184 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndre_184)$varcomp
+asreml::vpredict(st_NY23_sny_ndre_184, heritA ~ V1 / (V1 + V5)) # 0.99
+
+# NDRE: 187, 0.99 ( spatial borrowed from residual)
+st_NY23_sny_ndre_187 <- { 
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(fixed = NDRE_187 ~ 1 , 
+         random = ~ vm(Germplasm, grm_inverse) +ar1(Row):ar1(Range),
+         residual = ~ id(units),
+         data = ny_sny_pheno_23)}
+summary(st_NY23_sny_ndre_187)$varcomp
+asreml::vpredict(st_NY23_sny_ndre_187, heritA ~ V1 / (V1 + V5)) # 0.99
+
+```
+
+
+## make box plot to visulaize and compare 
+
+```{r Box plot to visualize heritability, Snyder_23}
+herit_results_sny_23 <- read.csv("2023/MSI_data/output_files/Heritabilities_withGRM_NY_Snyder_23.csv", sep = ",") 
+colnames(herit_results_sny_23)
+
+# Reshape all six heritability columns to long format
+herit_results_sny_23_long_all <- herit_results_sny_23 %>%
+  select(Time, h2_ndvi, h2_ndvi_spa,
+               h2_gndvi, h2_gndvi_spa,
+               h2_ndre, h2_ndre_spa) %>%
+  pivot_longer(cols = -Time, names_to = "Type", values_to = "Heritability") %>%
+  mutate(
+    Index = case_when(
+  grepl("gndvi", Type) ~ "GNDVI",
+  grepl("ndvi", Type) ~ "NDVI",
+  grepl("ndre", Type) ~ "NDRE"
+),
+    Model = ifelse(grepl("_spa", Type), "Spatial", "Simple"))
+
+
+gg_sny_23 <- ggplot(herit_results_sny_23_long_all, aes(x = Index, y = Heritability, fill = Index)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.4, color = "black") + # Randomly "jitter" (spread out) the data points horizontally by up to ±0.2 units on the x-axis (i.e., within each box)
+  # alternate geom_point() where all will be stacked in a vertical line so overalp issue.
+  facet_wrap(~ Model) +
+  labs(title = "h² by VI and Model Type in Snyder NY 2023",
+       x = "Vegetation Index",
+       y = "Heritability (h²)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  ylim(c(0,1)) +
+  scale_fill_brewer(palette = "Set2")
+
+gg_sny_23
+
+ggsave(filename = "Boxplot_Heritability_h2_VI_NY_Snyder_2023.png", plot = gg_sny_23, path = "2023/output_images", width = 8, height = 7,dpi = 400)
+
+
+
+
+############# Only simple h2 #######
+# make boxplot of h2_ndvi, h2_gndvi, h2_ndre ( not spatial ones)
+
+# Reshape only non-spatial heritability columns
+herit_results_sny_23_long_simple <- herit_results_sny_23 %>%
+  select(Time, h2_ndvi, h2_gndvi, h2_ndre) %>%
+  pivot_longer(
+    cols = -Time,
+    names_to = "Type",
+    values_to = "Heritability") %>%
+  mutate(
+    Index = case_when(
+      Type == "h2_ndvi"  ~ "NDVI",
+      Type == "h2_gndvi" ~ "GNDVI",
+      Type == "h2_ndre"  ~ "NDRE"))
+
+# Boxplot
+gg_sny_23_simple <- ggplot(
+  herit_results_sny_23_long_simple,
+  aes(x = Index, y = Heritability, fill = Index)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.4, color = "black") +
+  labs(
+    title = "h² by Vegetation Index in Snyder NY 2023",
+    x = "Vegetation Index",
+    y = "Heritability (h²)" ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  ylim(0, 1) +
+  scale_fill_brewer(palette = "Set2")
+
+gg_sny_23_simple
+
+ggsave(filename = "Boxplot_Heritability_h2_VI_NY_Snyder_2023_Simple_only.png",plot = gg_sny_23_simple,path = "2023/output_images",width = 7,height = 6,dpi = 400)
+```
+
+
+
+
+
+
+
+
+SNY 2023
+For Harvest window 1:  125, 136, 144, 150, and yld1
+- For Harvest window 2:  152, 156, 164, 166, 172, 177, 179, 186, 192, 195, 198, and yld2
+- For Harvest window 3: 213, 223, 228, 244, 248, 251, 255, and yld3
+
+```{r Variance component for Snyder 2023 for all yield and last gndvi 06052026}
+### =====================================================
+### Snyder 2023 Variance components
+### =====================================================
+
+### =====================================================
+### Harvest 1: GNDVI_150 <-> yld1
+### =====================================================
+
+# GNDVI_150
+st_ny23_sny_gndvi150 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = GNDVI_150 ~ 1 + Rep,
+    random = ~ vm(Germplasm, grm_inverse),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_gndvi150)$varcomp
+
+st_ny23_sny_gndvi150_spa <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = GNDVI_150 ~ 1,
+    random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_gndvi150_spa)$varcomp
+
+# yld1
+st_ny23_sny_yld1_base <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = yld1 ~ 1+ Rep,
+    random = ~ vm(Germplasm, grm_inverse),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld1_base)$varcomp
+
+st_ny23_sny_yld1 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = yld1 ~ 1,
+    random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld1)$varcomp
+
+
+### =====================================================
+### Harvest 2: GNDVI_198 <-> yld2
+### =====================================================
+
+# GNDVI_198
+st_ny23_sny_gndvi198 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = GNDVI_198 ~ 1+ Rep,
+    random = ~ vm(Germplasm, grm_inverse),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_gndvi198)$varcomp
+
+st_ny23_sny_gndvi198_spa <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = GNDVI_198 ~ 1,
+    random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_gndvi198_spa)$varcomp
+
+# yld2
+st_ny23_sny_yld2_base <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = yld2 ~ 1+ Rep,
+    random = ~ vm(Germplasm, grm_inverse),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld2_base)$varcomp
+
+st_ny23_sny_yld2 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = yld2 ~ 1,
+    random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld2)$varcomp
+
+
+### =====================================================
+### Harvest 3: GNDVI_255 <-> yld3
+### =====================================================
+
+# GNDVI_255
+st_ny23_sny_gndvi255 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = GNDVI_255 ~ 1+ Rep,
+    random = ~ vm(Germplasm, grm_inverse),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_gndvi255)$varcomp
+
+st_ny23_sny_gndvi255_spa <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = GNDVI_255 ~ 1,
+    random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_gndvi255_spa)$varcomp
+
+# yld3
+st_ny23_sny_yld3_base <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = yld3 ~ 1+ Rep,
+    random = ~ vm(Germplasm, grm_inverse),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld3_base)$varcomp
+
+st_ny23_sny_yld3 <- {
+  attr(grm_inverse, "INVERSE") <- TRUE
+  asreml(
+    fixed = yld3 ~ 1,
+    random = ~ vm(Germplasm, grm_inverse) + ar1(Row):ar1(Range),
+    residual = ~ id(units),
+    data = ny_sny_pheno_23)}
+summary(st_ny23_sny_yld3)$varcomp
+
+
+
+### =====================================================
+### Variance component summary table (Base)
+### =====================================================
+
+varcomp_sny23_base <- data.frame(
+  Trait = c("GNDVI_150","yld1",
+            "GNDVI_198","yld2",
+            "GNDVI_255","yld3"),
+  Genetic = c(
+    summary(st_ny23_sny_gndvi150)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_yld1_base)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_gndvi198)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_yld2_base)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_gndvi255)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_yld3_base)$varcomp["vm(Germplasm, grm_inverse)","component"]),
+  Residual = c(
+    summary(st_ny23_sny_gndvi150)$varcomp["units!R","component"],
+    summary(st_ny23_sny_yld1_base)$varcomp["units!R","component"],
+    summary(st_ny23_sny_gndvi198)$varcomp["units!R","component"],
+    summary(st_ny23_sny_yld2_base)$varcomp["units!R","component"],
+    summary(st_ny23_sny_gndvi255)$varcomp["units!R","component"],
+    summary(st_ny23_sny_yld3_base)$varcomp["units!R","component"])
+)
+
+varcomp_sny23_base
+
+
+
+
+### =====================================================
+### Variance component summary table (Spatial)
+### =====================================================
+
+varcomp_sny23_spatial <- data.frame(
+  Trait = c("GNDVI_150","yld1",
+            "GNDVI_198","yld2",
+            "GNDVI_255","yld3"),
+  Genetic = c(
+    summary(st_ny23_sny_gndvi150_spa)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_yld1)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_gndvi198_spa)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_yld2)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_gndvi255_spa)$varcomp["vm(Germplasm, grm_inverse)","component"],
+    summary(st_ny23_sny_yld3)$varcomp["vm(Germplasm, grm_inverse)","component"]),
+  Spatial = c(
+    summary(st_ny23_sny_gndvi150_spa)$varcomp["Row:Range","component"],
+    summary(st_ny23_sny_yld1)$varcomp["Row:Range","component"],
+    summary(st_ny23_sny_gndvi198_spa)$varcomp["Row:Range","component"],
+    summary(st_ny23_sny_yld2)$varcomp["Row:Range","component"],
+    summary(st_ny23_sny_gndvi255_spa)$varcomp["Row:Range","component"],
+    summary(st_ny23_sny_yld3)$varcomp["Row:Range","component"]),
+  Residual = c(
+    summary(st_ny23_sny_gndvi150_spa)$varcomp["units!R","component"],
+    summary(st_ny23_sny_yld1)$varcomp["units!R","component"],
+    summary(st_ny23_sny_gndvi198_spa)$varcomp["units!R","component"],
+    summary(st_ny23_sny_yld2)$varcomp["units!R","component"],
+    summary(st_ny23_sny_gndvi255_spa)$varcomp["units!R","component"],
+    summary(st_ny23_sny_yld3)$varcomp["units!R","component"])
+)
+
+varcomp_sny23_spatial
+```
+
+
+
+
+
+
+ 

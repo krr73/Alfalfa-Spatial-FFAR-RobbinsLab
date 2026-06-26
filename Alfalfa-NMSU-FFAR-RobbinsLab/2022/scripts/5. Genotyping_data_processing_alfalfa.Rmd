@@ -1,5 +1,5 @@
 ---
-title: "Running univariate models to calculate Heritability_ASReml"
+title: "Processing GBS data to get GRM in NMSU Genotypes"
 author: "Dinesh Ghimire"
 date: "2025-07-22"
 output: html_document
@@ -326,7 +326,6 @@ write.csv(AF_matrix_cleaned, file = "2022/genotype_data/allele_freq_matrix_96GT_
 
 ```
 
-allele_freq_matrix_96GT_10DP_bi_5_sample80.csv
 
 Visualize after additional SNP cutoff
 ```{r}
@@ -390,12 +389,6 @@ ggplot(snp_df, aes(x = Chromosome, y = Position)) +
        y = "Position (bp)") +
   theme_minimal()
 ```
-
-
-12092025
-# do LD pruning, maf and mean imputation separately for NMSU samples and NY samples ( above filtering can be same)
-
-
 
 
 
@@ -597,7 +590,6 @@ ggplot(AF_pruned_pos, aes(x = POS)) +
 
 
 
-ONLY DONE ON AF MATRIX NOT IN VCF
 # ------------------------------------ Imputation  ------------------------------------------
 
 
@@ -798,7 +790,6 @@ write.csv(G_mat, file = "2022/genotype_data/GRM_alfalfa.csv", row.names = TRUE)
  
  
  ----------------------------------------- PROCESSING GRM TO MATCH WITH PHENO FILE ----------------
- 08052025 lets try with GRM
 First process GRM to match genotypes/lines as in phenotype file
 ```{r Processing GRM file 08122025}
 
@@ -932,98 +923,6 @@ hist(diag(expanded_grm))
 
 ```
 
-
-
-Q. take mean of just 19 or 24???? cz with 24 the diagonal values of added genotypes is not 1.
-looks similar with and without trace so next lets only take mean of original genotypes from GRM (not added 5's.)
-concl: Will use expanded_grm_scaled_19 ( scaled for only genotyped samples and not all 24)
-
-Reliability
-
-reliability = (1+Fi) - C' * residual variance/additive genetic variance
-F = 0 for outbreds
-C can be set to 1 if unknown ( it is variances of prediction error)
-For outbreds and assuming c' = 1, 
-accuracy of EBV or reliability = 1- (residual variance/additive genetic variance)
- = 1 - units/germplasm in model output below
- 
-```{r Testing different GRM's 08122025}
-# 1. with trace (for all grm)
-# now run the model
-grm_mat_scaled_agh <- expanded_grm_scaled+diag(.0005,length(expanded_grm_scaled[,1]),length(expanded_grm_scaled[,1]))
-grm_mat_scaled_inverse <- solve(grm_mat_scaled_agh)
-
-st_pheno_222 <- { 
-  attr(grm_mat_scaled_inverse, "INVERSE") <- TRUE
-  asreml(fixed = GNDVI_222 ~ 1 + Rep, #rep effect as fixed
-         random = ~ vm(Germplasm, grm_mat_scaled_inverse) +ar1v(Row):ar1(Range),
-         residual = ~ id(units),
-         data = nmsu22_nor_pheno)}
-summary(st_pheno_222)$varcomp
-asreml::vpredict(st_pheno_222, heritA ~ V1 / (V1 + V5)) # 0.855
-
-reliability_grm_subset <- 1 - (6.129721e-05/3.613374e-04)
-reliability_grm_subset # 0.830
-
-
-
-# 2. without trace
-# now run the model
-grm_mat_agh <- expanded_grm+diag(.0005,length(expanded_grm[,1]),length(expanded_grm[,1]))
-grm_mat_inverse <- solve(grm_mat_agh)
-
-st_pheno_222_2 <- { 
-  attr(grm_mat_inverse, "INVERSE") <- TRUE
-  asreml(fixed = GNDVI_222 ~ 1 + Rep, #rep effect as fixed
-         random = ~ vm(Germplasm, grm_mat_inverse) +ar1v(Row):ar1(Range),
-         residual = ~ id(units),
-         data = nmsu22_nor_pheno)}
-summary(st_pheno_222_2)$varcomp
-asreml::vpredict(st_pheno_222_2, heritA ~ V1 / (V1 + V5)) # 0.8597
-
-reliability_grm_subset_2 <- 1 - (0.0000612972/0.0003754820)
-reliability_grm_subset_2 # 0.8367
-
-
-# 3. with trace (for only 19 genotypes)
-# now run the model
-grm_mat_19_scaled_agh <- expanded_grm+diag(.0005,length(expanded_grm[,1]),length(expanded_grm[,1]))
-grm_mat_19_scaled_inverse <- solve(grm_mat_19_scaled_agh)
-
-st_pheno_222_19 <- { 
-  attr(grm_mat_19_scaled_inverse, "INVERSE") <- TRUE
-  asreml(fixed = GNDVI_222 ~ 1 + Rep, #rep effect as fixed
-         random = ~ vm(Germplasm, grm_mat_19_scaled_inverse) +ar1v(Row):ar1(Range),
-         residual = ~ id(units),
-         data = nmsu22_nor_pheno)}
-summary(st_pheno_222_19)$varcomp
-asreml::vpredict(st_pheno_222_19, heritA ~ V1 / (V1 + V5)) # 0.8559
-
-reliability_grm_subset <- 1 - (6.141126e-05/3.647449e-04)
-reliability_grm_subset # 0.8316
-
-
-# 4. AND one without GRM
-st_nmsu22_nor_gndvi_222 <- { # no GRM line here cz no GRM now
-  asreml(fixed = GNDVI_222 ~ 1 + Rep, #rep effect as fixed
-         random = ~ id(Germplasm) +ar1(Row):ar1(Range),
-         residual = ~ id(units),
-         data = nmsu22_nor_pheno)}
-summary(st_nmsu22_nor_gndvi_222)$varcomp
-asreml::vpredict(st_nmsu22_nor_gndvi_222, heritA ~ V1 / (V1 + V5))  # 0.859
-Germplasm           3.731781e-04 0.0001169098  3.192016     P   0
-Row:Range           5.481238e-04 0.0003146136  1.742213     P   0
-Row:Range!Row!cor   8.931294e-01 0.0708481697 12.606245     U   0
-Row:Range!Range!cor 9.086220e-01 0.0471713644 19.262151     U   0
-units!R             6.106678e-05 0.0000137259  4.449017     P   0
-
-# For PEV but its so low and it is germplasm specific
-# preds <- predict(st_nmsu22_nor_gndvi_222, classify = "Germplasm", stderr = TRUE)
-
-
-relaibaility <- 1 - (6.106678e-05/3.731781e-04)
-relaibaility # 0.83
-```
 
 
 Will use 19 genotypes lines + 5 not genotyped lines from pheno files with an assumption that these 5 have no relationship with the other 19. 

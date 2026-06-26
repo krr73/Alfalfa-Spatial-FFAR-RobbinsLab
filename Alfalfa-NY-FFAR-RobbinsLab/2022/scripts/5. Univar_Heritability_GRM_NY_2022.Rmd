@@ -1,5 +1,5 @@
 ---
-title: "Running univariate models with GRM and spatial to calculate Heritability_ASReml"
+title: "Running univariate models with GRM and spatial to calculate Heritability_ASReml in NY 2022 Trials"
 author: "Dinesh Ghimire"
 date: "2026-05-07"
 output: html_document

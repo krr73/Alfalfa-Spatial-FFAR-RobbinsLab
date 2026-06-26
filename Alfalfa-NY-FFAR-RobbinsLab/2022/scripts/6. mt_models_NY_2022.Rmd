@@ -1,5 +1,5 @@
 ---
-title: "Running bivariate models (mt models) with GRM and spatial to calculate genetic and spatial correlations"
+title: "Running bivariate models (mt models) with GRM and spatial to calculate genetic and spatial correlations in NY 2022 trials"
 author: "Dinesh Ghimire"
 date: "2026-05-07"
 output: html_document

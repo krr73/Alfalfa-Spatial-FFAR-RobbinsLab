@@ -1,5 +1,5 @@
 ---
-title: "2022_MSI_processing"
+title: "2022_MSI_processing NY 2022"
 author: "Dinesh Ghimire"
 date: "2026-05-04"
 output: html_document
@@ -174,7 +174,6 @@ write.csv(ny22_mus_GDD_sum,file =  "2022/meta_data/NY22_musgrave_doy_GDD_sum.csv
 ### Processing huge data from ImageBreed into relevant indices for reducing size and removing unnecessary columns
   ### from imagebreed, we can gsny Blue, Green, Red (RGB) plus NIR bands, and some indices like CCCI, TGI, VARI, NDVI,and NDRE.
   
-061225: kelly suggested to include other VI's as well. Went and looked at Ranjita's paper. Found out it's worth checking GNDVI which seems to be doing good job. So lets include GNDVI as well. first need to calculate GNDVI which is the ratio of (NIR-green)/(NIR+green). 
 
 ```{r Processing huge data from ImageBreed into NDVI, NDRE and GNDVI, 05042026}
 # Step 1: Select NDVI, NDRE, and GNDVI-related columns

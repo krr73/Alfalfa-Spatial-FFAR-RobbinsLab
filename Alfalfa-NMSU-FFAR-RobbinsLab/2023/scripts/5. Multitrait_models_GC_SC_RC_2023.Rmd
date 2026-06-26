@@ -1,5 +1,5 @@
 ---
-title: "Running multivariate models 2023"
+title: "Running multivariate models 2023 NMSU"
 author: "Dinesh Ghimire"
 date: "2025-09-01"
 output: html_document

@@ -1,5 +1,5 @@
 ---
-title: "Running bivariate models with GRM and spatial to calculate genetic and spatial correlations"
+title: "Running bivariate models with GRM and spatial to calculate genetic and spatial correlations in Ny 2023 data"
 author: "Dinesh Ghimire"
 date: "2026-05-13"
 output: html_document

@@ -1,5 +1,5 @@
 ---
-title: "Simple Phenotypic correlation to screen VI's"
+title: "Simple Phenotypic correlation to screen VI's in NMSU 2023"
 author: "Dinesh Ghimire"
 date: "2025-07-31"
 output: html_document

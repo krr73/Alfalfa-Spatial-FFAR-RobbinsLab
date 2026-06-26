@@ -1,5 +1,5 @@
 ---
-title: "Running univariate models to calculate Heritability_ASReml"
+title: "Phenotypic Correlations in NMSU Trials"
 author: "Dinesh Ghimire"
 date: "2025-06-18"
 output: html_document
@@ -92,11 +92,12 @@ write.csv(gndvi_cor, file = "2022/MSI_data/output_files/Pheno_Correlation_GNDVI_
 ```
 
 - deleted normal heatmaps code and updated with below
-Kelly suggested to put each harvest at the end of each window and separate out each harvest window visually. 
+KRR suggested to put each harvest at the end of each window and separate out each harvest window visually. 
 For that need to :
 - reorder time points and yield i.e. columns
 - create new matrix based on that reordering
 - make window and plot the heatmaps.
+
 ```{r Pheno HeatMaps Correlation VI's and Yield}
 # Goal here: Place each harvest (yield) at the end of its respective window and visually separate windows in heatmaps.
 
@@ -577,6 +578,5 @@ mean(gndvi_cor_reordered_et[1:7, 8], na.rm = TRUE)
 ggsave(filename = "Pheno_Cor_Mean_VI_LinePlot_nmsu_et_2022.png", plot = lineplot_et_22, path = "2022/output_images", width = 6, height = 5,dpi = 400)
 
 ```
-Due to termination time points, window 4 has negative mean for NDVI as well and window 5 is also affected.
 
  

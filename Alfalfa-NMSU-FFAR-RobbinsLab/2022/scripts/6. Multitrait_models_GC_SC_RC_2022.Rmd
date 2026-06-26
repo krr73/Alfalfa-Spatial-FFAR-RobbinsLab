@@ -1,5 +1,5 @@
 ---
-title: "Running multivariate models"
+title: "Running multivariate models in NMSU trials"
 author: "Dinesh Ghimire"
 date: "2025-08-22"
 output: html_document

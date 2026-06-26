@@ -1,5 +1,5 @@
 ---
-title: "Plots for Manuscript"
+title: "Plots for Manuscript Spatial"
 author: "Dinesh Ghimire"
 date: "2026-06-18"
 output: html_document
@@ -106,9 +106,7 @@ ggsave( filename = "Heatmap_Yield2_AR_RR_Comparison_NOR23_NMSU.png", plot = comb
 
 
 
-next also see if we need, to comapre with original yield.. 
 
-PEE better match with original yield so lets include that... 
 ```{r}
 # Read files
 spatial_blup_nmsu23_nor_GNDVI_scaled <- read.csv("2023/MSI_data/output_files/scaled_spatial_blups_GNDVI_nor_23.csv") # to get GNDVI_152 spatial effects from AR model as well as yield spatial effects... 

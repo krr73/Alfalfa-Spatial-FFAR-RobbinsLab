@@ -1,5 +1,5 @@
 ---
-title: "Plots"
+title: "Plots NMSU 2023"
 author: "Dinesh Ghimire"
 date: "2025-07-31"
 output: html_document

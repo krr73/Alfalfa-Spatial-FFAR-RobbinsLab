@@ -1,5 +1,5 @@
 ---
-title: "Running univariate models to calculate Heritability_ASReml"
+title: "Running univariate models to calculate Heritability_ASReml in NMSU Trials"
 author: "Dinesh Ghimire"
 date: "2025-06-18"
 output: html_document

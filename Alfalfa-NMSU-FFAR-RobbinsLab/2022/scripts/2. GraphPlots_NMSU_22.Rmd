@@ -1,5 +1,5 @@
 ---
-title: "Plots - Univariate and Mt model genetic and spatial graphs"
+title: "Plots - Univariate and Mt model genetic and spatial graphs NMSU"
 author: "Dinesh Ghimire"
 date: "2024-04-08"
 output: html_document
